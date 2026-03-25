@@ -909,4 +909,8 @@ def analyze_binary(filepath, base_addr=LOAD_ADDR):
 
 if __name__ == '__main__':
     filepath = sys.argv[1] if len(sys.argv) > 1 else "disc_extract/1ST_READ.BIN"
-    analyze_binary(filepath)
+    base = LOAD_ADDR
+    for i, arg in enumerate(sys.argv):
+        if arg == '--base' and i + 1 < len(sys.argv):
+            base = int(sys.argv[i + 1], 0)
+    analyze_binary(filepath, base)

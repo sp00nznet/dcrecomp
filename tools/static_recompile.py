@@ -1119,17 +1119,29 @@ class SH4Recompiler:
 
 
 def main():
-    binary_path = sys.argv[1] if len(sys.argv) > 1 else "disc_extract/1ST_READ.BIN"
-    output_dir = sys.argv[2] if len(sys.argv) > 2 else "src/game"
-    header_dir = sys.argv[3] if len(sys.argv) > 3 else "include/game"
+    # Parse arguments
+    positional = []
+    base_addr = LOAD_ADDR
+    for i, arg in enumerate(sys.argv[1:], 1):
+        if arg == '--base' and i + 1 <= len(sys.argv) - 1:
+            base_addr = int(sys.argv[i + 1], 0)
+        elif i > 1 and sys.argv[i - 1] == '--base':
+            continue  # skip value after --base
+        else:
+            positional.append(arg)
+
+    binary_path = positional[0] if len(positional) > 0 else "disc_extract/1ST_READ.BIN"
+    output_dir = positional[1] if len(positional) > 1 else "src/game"
+    header_dir = positional[2] if len(positional) > 2 else "include/game"
 
     print(f"Loading {binary_path}...")
     with open(binary_path, 'rb') as f:
         data = f.read()
 
     print(f"Binary: {len(data):,} bytes")
+    print(f"Base address: 0x{base_addr:08X}")
 
-    recompiler = SH4Recompiler(data)
+    recompiler = SH4Recompiler(data, base_addr)
 
     print("Finding functions...")
     recompiler.find_functions()

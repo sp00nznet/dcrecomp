@@ -25,6 +25,7 @@ import json
 # ISO9660 constants
 ISO_PVD_SECTOR = 16
 SECTOR_SIZE = 2048
+GD_ROM_HD_START = 45000  # GD-ROM high-density area start LBA
 
 # Naomi header location
 NAOMI_HEADER_OFFSET = 0x800000
@@ -112,23 +113,21 @@ def parse_directory_record(data, offset):
     return entry, record_len
 
 
-def list_directory(rom_data, base_offset, abs_lba, size):
+def lba_to_rom_offset(lba, header_offset):
+    """Convert GD-ROM LBA to ROM byte offset.
+
+    Naomi ROMs embed a GD-ROM filesystem image. The header at header_offset
+    corresponds to LBA GD_ROM_HD_START (45000). So:
+        rom_offset = header_offset + (lba - GD_ROM_HD_START) * SECTOR_SIZE
+    """
+    return header_offset + (lba - GD_ROM_HD_START) * SECTOR_SIZE
+
+
+def list_directory(rom_data, header_offset, abs_lba, size):
     """List all entries in an ISO9660 directory."""
     entries = []
-    # Calculate actual byte offset: LBA is relative to the ISO volume
-    # On Naomi ROMs, LBAs are relative to the start of the ISO within the ROM
-    byte_offset = base_offset + (abs_lba * SECTOR_SIZE) - (base_offset // SECTOR_SIZE * SECTOR_SIZE)
 
-    # Actually, the LBAs in the ISO directory entries are absolute sector numbers
-    # relative to the start of the ISO image. The ISO starts at base_offset in the ROM.
-    # So the actual byte offset = base_offset + (lba - first_lba) * SECTOR_SIZE
-    # But we need to figure out what first_lba maps to base_offset.
-
-    # The PVD is at sector 16 of the ISO, and we found it at base_offset in the ROM.
-    # So sector 16 = base_offset, meaning sector 0 = base_offset - 16*2048
-    iso_start = base_offset - (ISO_PVD_SECTOR * SECTOR_SIZE)
-
-    byte_offset = iso_start + abs_lba * SECTOR_SIZE
+    byte_offset = lba_to_rom_offset(abs_lba, header_offset)
     if byte_offset < 0 or byte_offset >= len(rom_data):
         print(f"  WARNING: directory LBA {abs_lba} maps to offset 0x{byte_offset:X} (out of range)")
         return entries
@@ -145,19 +144,18 @@ def list_directory(rom_data, base_offset, abs_lba, size):
                 break
             offset = next_sector
             continue
-        # Store the ISO start so we can extract files
-        entry['_iso_start'] = iso_start
+        entry['_header_offset'] = header_offset
         entries.append(entry)
         offset += record_len
 
     return entries
 
 
-def extract_file(rom_data, iso_start, abs_lba, size, output_path):
+def extract_file(rom_data, header_offset, abs_lba, size, output_path):
     """Extract a file from the ROM using its ISO9660 extent."""
     os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
 
-    byte_offset = iso_start + abs_lba * SECTOR_SIZE
+    byte_offset = lba_to_rom_offset(abs_lba, header_offset)
     if byte_offset < 0 or byte_offset + size > len(rom_data):
         print(f"  WARNING: file at LBA {abs_lba} (0x{byte_offset:X}) size {size} out of range")
         return 0
@@ -168,9 +166,9 @@ def extract_file(rom_data, iso_start, abs_lba, size, output_path):
     return size
 
 
-def extract_directory(rom_data, base_offset, abs_lba, size, output_dir, prefix=""):
+def extract_directory(rom_data, header_offset, abs_lba, size, output_dir, prefix=""):
     """Recursively extract all files from an ISO9660 directory."""
-    entries = list_directory(rom_data, base_offset, abs_lba, size)
+    entries = list_directory(rom_data, header_offset, abs_lba, size)
     total_bytes = 0
 
     for entry in entries:
@@ -178,17 +176,17 @@ def extract_directory(rom_data, base_offset, abs_lba, size, output_dir, prefix="
             continue
 
         path = os.path.join(prefix, entry['name']) if prefix else entry['name']
-        iso_start = entry.get('_iso_start', base_offset - ISO_PVD_SECTOR * SECTOR_SIZE)
+        hdr_off = entry.get('_header_offset', header_offset)
 
         if entry['is_directory']:
             print(f"  [DIR]  {path}/")
             os.makedirs(os.path.join(output_dir, path), exist_ok=True)
-            total_bytes += extract_directory(rom_data, base_offset,
+            total_bytes += extract_directory(rom_data, hdr_off,
                                             entry['extent_lba'], entry['data_length'],
                                             output_dir, path)
         else:
             output_path = os.path.join(output_dir, path)
-            sz = extract_file(rom_data, iso_start, entry['extent_lba'],
+            sz = extract_file(rom_data, hdr_off, entry['extent_lba'],
                             entry['data_length'], output_path)
             total_bytes += sz
             print(f"  [FILE] {path:30s}  {sz:>12,} bytes")
@@ -283,11 +281,13 @@ def main():
         print(f"\n=== ISO9660 Filesystem at 0x{pvd_offset:08X} ===")
         print(f"  Volume:  {volume_id}")
         print(f"  Root:    LBA {root_lba}, size {root_size}")
+        print(f"  LBA base: {GD_ROM_HD_START} (GD-ROM HD area)")
+        print(f"  Root ROM offset: 0x{lba_to_rom_offset(root_lba, header_offset):08X}")
 
-        # Extract everything
+        # Extract everything - use header_offset as the base for LBA conversion
         print(f"\n=== Extracting to {output_dir}/ ===")
         os.makedirs(output_dir, exist_ok=True)
-        total = extract_directory(rom_data, pvd_offset, root_lba, root_size, output_dir)
+        total = extract_directory(rom_data, header_offset, root_lba, root_size, output_dir)
         print(f"\nExtracted {total:,} bytes total")
 
     # Save header info

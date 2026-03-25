@@ -17,10 +17,19 @@ dcrecomp/
 ├── include/
 │   ├── recompiler/sh4_cpu.h    # SH-4 CPU state (registers, memory, MMU)
 │   ├── hal/
-│   │   ├── dc_hardware.h       # Hardware registers (PVR, AICA, Maple, SB)
-│   │   ├── pvr2.h              # PowerVR2 Tile Accelerator + renderer API
-│   │   └── naomi_io.h          # Naomi JVS arcade I/O (buttons, coins, card readers)
+│   │   ├── dc_hardware.h       # Hardware registers (lightweight/legacy HAL)
+│   │   ├── pvr2.h              # PowerVR2 TA + renderer API (lightweight)
+│   │   ├── naomi_io.h          # Naomi JVS I/O (lightweight)
+│   │   └── flycast_adapter.h   # C API bridging to Flycast C++ subsystems
 │   └── platform/platform.h     # SDL2/Win32 platform abstraction
+├── flycast/                     # Extracted Flycast hardware emulation (GPLv2)
+│   ├── pvr/                    # PowerVR2 GPU (TA, textures, OpenGL/Vulkan/DX)
+│   ├── aica/                   # AICA sound (64-ch, ADPCM, ARM7 DSP)
+│   ├── maple/                  # Maple bus + full JVS protocol
+│   ├── naomi/                  # ROM boards, card readers, hoppers, EEPROMs
+│   ├── holly/                  # System bus, interrupt controller, DMA
+│   ├── mem/                    # Address space routing + handler registration
+│   └── README.md               # Integration architecture docs
 ├── src/
 │   ├── recompiler/sh4_cpu.c    # CPU state, memory access, address translation
 │   ├── hal/
@@ -124,11 +133,47 @@ cmake ..
 cmake --build . --config Release
 ```
 
+## Hardware Backends
+
+dcrecomp supports two hardware emulation backends:
+
+### Lightweight HAL (legacy)
+The original homespun hardware abstraction (`src/hal/`). Simple register stubs
+suitable for initial bring-up and headless testing. Limited accuracy.
+
+### Flycast Backend (recommended)
+Battle-tested hardware emulation extracted from [Flycast](https://github.com/flyinghead/flycast)
+(`flycast/`). Provides accurate PVR2 rendering (with textures, fog, modifier volumes),
+full AICA sound, complete JVS arcade I/O protocol, Naomi card readers, and more.
+
+The Flycast backend follows the same pattern used by other recomp projects
+(e.g., Xenia → Xenon recomp): take a mature emulator, strip the CPU
+interpreter/JIT, and link the hardware subsystems as libraries against
+statically recompiled game code.
+
+See `flycast/README.md` and `docs/flycast-extraction.md` for details.
+
 ## Current Projects
 
 - **Crazy Taxi** (Dreamcast) - 11,561 functions, first link achieved
-- **Mushiking: King of Beetles** (Naomi) - 26,004 functions, builds and runs in headless mode
+- **Mushiking: King of Beetles** (Naomi) - 26,004 functions, SDL2+OpenGL build running
+
+## Contributing
+
+This framework is designed to make Dreamcast/Naomi static recompilation accessible.
+To recomp a new game:
+
+1. Obtain the ROM/disc image
+2. Run the extraction pipeline (decrypt if Naomi M4, extract filesystem)
+3. Disassemble with `sh4_disasm.py`
+4. Recompile with `static_recompile.py`
+5. Create a game project with dcrecomp as a submodule
+6. Write a `main.c` bootstrap (set entry point, RAM size, BIOS state)
+7. Build and iterate on hardware interactions
+
+See Mushiking (kingofbeetle) as a reference implementation.
 
 ## License
 
-Private repository.
+- dcrecomp core: Private repository
+- Flycast subsystems (`flycast/`): GPLv2 (see flycast/README.md)

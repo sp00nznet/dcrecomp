@@ -93,6 +93,10 @@ Compile with CMake → Native executable
 | Maple Bus (DC controllers) | Full |
 | Naomi JVS I/O | Basic (buttons, coins, card reader) |
 | Naomi M4 decryption | Full |
+| Flycast PVR2 (textures, fog, all vertex types) | Extracted, adapter in progress |
+| Flycast AICA (full sound) | Extracted, not yet wired |
+| Flycast JVS (complete arcade I/O) | Extracted, not yet wired |
+| Flycast Naomi (card readers, hoppers, ROMs) | Extracted, not yet wired |
 
 ## Usage
 

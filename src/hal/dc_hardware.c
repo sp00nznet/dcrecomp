@@ -147,6 +147,17 @@ uint32_t dc_hw_read32(DCHardware *hw, uint32_t addr) {
     case PVR_FB_ADDR2:
         return hw->pvr_fb_addr2;
 
+    case 0x005F810C: { /* SPG_STATUS - sync pulse generator status */
+        /* Simulate scanline counter progressing at ~31.5kHz (525 lines per frame @ 60Hz) */
+        uint64_t now = platform_get_ticks_ms();
+        /* Each millisecond ≈ 31.5 scanlines */
+        uint32_t scanline = (uint32_t)((now * 315) / 10) % 525;
+        uint32_t vsync = (scanline >= 480) ? 1 : 0;  /* VSync during lines 480-524 */
+        uint32_t blank = vsync;  /* Blank during VBlank */
+        uint32_t fieldnum = (uint32_t)(now / 16) & 1; /* Alternate fields */
+        return (scanline & 0x3FF) | (fieldnum << 10) | (blank << 11) | (vsync << 13);
+    }
+
     default:
         if (phys >= 0x005F6800 && phys < 0x005FA000) {
             return hw->hw_regs[hw_reg_idx(phys)];
@@ -174,6 +185,17 @@ void dc_hw_write32(DCHardware *hw, uint32_t addr, uint32_t val) {
     /* Always log DMA-related writes */
     if (phys >= 0x005F7C00 && phys <= 0x005F7C18) {
         printf("[PVR-DMA] write 0x%08X = 0x%08X\n", phys, val);
+    }
+
+    /* SB_MDST - Maple DMA start/status */
+    if (phys == 0x005F6C18) {
+        if (val & 1) {
+            uint32_t mdstar = hw->hw_regs[hw_reg_idx(0x005F6C04)];
+            dc_maple_dma(hw, mdstar);
+            hw->hw_regs[hw_reg_idx(0x005F6C18)] = 0;
+            hw->sb_istnrm |= (1 << 12); /* Maple DMA complete */
+        }
+        return;
     }
 
     switch (phys) {
@@ -282,12 +304,7 @@ void dc_hw_write32(DCHardware *hw, uint32_t addr, uint32_t val) {
         }
         break;
 
-    case MAPLE_DMA_START:
-        if (val & 1) {
-            /* Maple DMA transfer - handle controller polling */
-            dc_maple_poll(hw);
-        }
-        break;
+    /* SB_MDST handled above the switch via if-check */
 
     case SB_PDST:
         if (val & 1) {
@@ -402,6 +419,169 @@ void dc_maple_poll(DCHardware *hw) {
     /* TODO: Read from SDL2 game controller */
     /* For now, controllers maintain their current state */
     (void)hw;
+}
+
+/* Process Maple DMA command table */
+void dc_maple_dma(DCHardware *hw, uint32_t mdstar) {
+    uint8_t *ram = sh4_get_ram_ptr();
+    if (!ram) return;
+
+    uint32_t addr = mdstar & 0x1FFFFFFF;
+    bool last = false;
+    int cmd_count = 0;
+    static int maple_log = 0;
+
+    while (!last && cmd_count < 32) {
+        cmd_count++;
+
+        /* Read DMA descriptor */
+        uint32_t header_1 = *(uint32_t *)(ram + (addr & 0x01FFFFFF));
+        uint32_t header_2 = *(uint32_t *)(ram + ((addr + 4) & 0x01FFFFFF)) & 0x1FFFFFE0;
+
+        last = (header_1 >> 31) & 1;
+        uint32_t plen = (header_1 & 0xFF) + 1;  /* length in 32-bit words */
+        uint32_t maple_op = (header_1 >> 8) & 7;
+        uint32_t bus = (header_1 >> 16) & 3;
+
+        if (maple_op == 0) {
+            /* MP_Start - process Maple frame */
+            uint32_t *p_data = (uint32_t *)(ram + ((addr + 8) & 0x01FFFFFF));
+            uint32_t frame_header = p_data[0];
+            uint32_t command = frame_header & 0xFF;
+            uint32_t reci = (frame_header >> 8) & 0xFF;
+            uint32_t port = reci >> 6;
+
+            /* Response destination */
+            uint32_t *resp = (uint32_t *)(ram + (header_2 & 0x01FFFFFF));
+
+            if (maple_log < 40) {
+                maple_log++;
+                printf("[MAPLE] bus=%u cmd=0x%02X port=%u reci=0x%02X resp_before=0x%08X resp_addr=0x%08X\n",
+                       bus, command, port, reci, resp[0], header_2);
+            }
+
+            /* Maple response: byte0=response_code, byte1=src, byte2=dst, byte3=len_words */
+            uint32_t src_addr = reci;
+            uint32_t dst_addr = (frame_header >> 16) & 0xFF;
+            uint8_t *resp_bytes = (uint8_t *)resp;
+            uint8_t *in_bytes = (uint8_t *)p_data;
+
+            /* Only bus 0 has devices. Write -1 for empty buses. */
+            if (bus != 0) {
+                resp[0] = (uint32_t)-1;
+            } else {
+                switch (command) {
+                case 0x01: /* MDC_DeviceRequest - get device info */
+                    /* MDRS_DeviceStatus (0x05), 28 words */
+                    resp[0] = 0x05 | (src_addr << 8) | (dst_addr << 16) | (0x1C << 24);
+                    resp[1] = 0x0E000000; /* ft0 = Naomi JAMMA (function type 0x0E) */
+                    resp[2] = 0x00000000;
+                    resp[3] = 0x00000000;
+                    resp[4] = 0x00000000; /* Function def block 0 */
+                    resp[5] = 0x00000000;
+                    resp[6] = 0x00000000;
+                    memset(&resp[7], 0x20, 84); /* pad rest with spaces */
+                    memcpy(&resp[7], "315-6149    SEGA ENTERPRISES", 28);
+                    memcpy(&resp[15], "Produced By or Under License From SEGA ENTERPRISES,LTD.", 56);
+                    resp[29] = 0x01AE; /* standby/max current */
+                    break;
+
+                case 0x03: /* MDC_DeviceReset */
+                    resp[0] = 0x07 | (src_addr << 8) | (dst_addr << 16) | (0x00 << 24);
+                    break;
+
+                case 0x05: /* MDC_DeviceStatus (All Status) */
+                    resp[0] = 0x07 | (src_addr << 8) | (dst_addr << 16) | (0x00 << 24);
+                    break;
+
+                case 0x09: /* Get Condition */
+                    resp[0] = 0x08 | (src_addr << 8) | (dst_addr << 16) | (0x01 << 24);
+                    resp[1] = 0x0E000000; /* ft = JAMMA */
+                    break;
+
+                case 0x80: { /* MDC_JVSUploadFirmware */
+                    /* Accept firmware upload silently, respond with DeviceReply */
+                    /* Calculate checksum of input data */
+                    uint8_t sum = 0;
+                    for (uint32_t i = 4; i < plen * 4; i++)
+                        sum += in_bytes[i];
+                    /* First response: echo command with checksum */
+                    resp[0] = 0x80 | (src_addr << 8) | (dst_addr << 16) | (0x01 << 24);
+                    resp[1] = (uint32_t)sum;
+                    /* Second response word: DeviceReply */
+                    resp[2] = 0x07 | (src_addr << 8) | (dst_addr << 16) | (0x00 << 24);
+                    break;
+                }
+
+                case 0x82: { /* MDC_JVSGetId */
+                    /* Return MIE board ID: "315-6149    COPYRIGHT SEGA ENTERPRISES CO,LTD.  1998" */
+                    static const char MIE_ID[56] = "315-6149    COPYRIGHT SEGA ENTERPRISES CO,LTD.  1998";
+                    /* Part 1: first 28 bytes */
+                    resp[0] = 0x83 | (src_addr << 8) | (dst_addr << 16) | (0x07 << 24);
+                    memcpy(&resp[1], MIE_ID, 28);
+                    /* Part 2: next 20 bytes */
+                    resp[8] = 0x83 | (src_addr << 8) | (dst_addr << 16) | (0x05 << 24);
+                    memcpy(&resp[9], MIE_ID + 28, 20);
+                    break;
+                }
+
+                case 0x84: /* MDC_JVSSelfTest */
+                    resp[0] = 0x85 | (src_addr << 8) | (dst_addr << 16) | (0x01 << 24);
+                    resp[1] = 0; /* test OK */
+                    break;
+
+                case 0x86: { /* MDC_JVSCommand - JVS I/O operations */
+                    uint8_t subcmd = in_bytes[4]; /* first byte after header */
+                    if (maple_log < 20) {
+                        maple_log++;
+                        printf("[JVS] subcmd=0x%02X\n", subcmd);
+                    }
+
+                    switch (subcmd) {
+                    case 0x15: { /* Read controls */
+                        /* Response: 0x87, 14 words of control data */
+                        resp[0] = 0x87 | (src_addr << 8) | (dst_addr << 16) | (0x0E << 24);
+                        resp[1] = 0x00000001; /* status OK */
+                        /* System buttons: byte 0 = test/tilt, rest = player buttons */
+                        /* All buttons released */
+                        for (int i = 2; i <= 14; i++) resp[i] = 0;
+                        /* Coin counts at resp[6..7] */
+                        break;
+                    }
+
+                    case 0x01: /* EEPROM read init */
+                    case 0x03: /* EEPROM read */
+                    case 0x0B: /* EEPROM write */
+                        /* Acknowledge EEPROM operations */
+                        resp[0] = 0x87 | (src_addr << 8) | (dst_addr << 16) | (0x01 << 24);
+                        resp[1] = 0; /* OK */
+                        break;
+
+                    case 0x27: /* Transmit data to card reader */
+                    case 0x21: /* Card reader init */
+                        resp[0] = 0x87 | (src_addr << 8) | (dst_addr << 16) | (0x01 << 24);
+                        resp[1] = 0;
+                        break;
+
+                    default:
+                        resp[0] = 0x87 | (src_addr << 8) | (dst_addr << 16) | (0x01 << 24);
+                        resp[1] = 0; /* generic OK */
+                        break;
+                    }
+                    break;
+                }
+
+                default:
+                    resp[0] = (uint32_t)-1;
+                    break;
+                }
+            }
+        }
+        /* else: NOP, Reset, SDCKB - just skip */
+
+        /* Advance to next descriptor */
+        addr += 8 + plen * 4;
+    }
 }
 
 MapleController* dc_maple_get_controller(DCHardware *hw, int port) {

@@ -435,6 +435,19 @@ void sh4_write32(SH4CPU *cpu, uint32_t addr, uint32_t val) {
     uint32_t phys = translate_addr(addr);
 
     if (phys >= DC_RAM_BASE && phys < DC_RAM_BASE + cpu->ram_size) {
+        /* Protect allocator vtable pointer: keep default vtable (0x8C1733A4)
+         * The init code overwrites it with a free list node address, which
+         * breaks the vtable dispatch. Block the second write. */
+        if (phys == 0x0C2FB7A4) {
+            static int wp_count = 0;
+            if (wp_count == 0) {
+                /* First write: allow (sets up default vtable) */
+                wp_count++;
+            } else {
+                /* Subsequent writes: block (would break vtable) */
+                return;
+            }
+        }
         *(uint32_t *)(cpu->ram + (phys & cpu->ram_mask)) = val;
         return;
     }

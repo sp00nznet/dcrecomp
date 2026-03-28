@@ -72,9 +72,12 @@ typedef struct {
 /* ========== Maple Bus (Controllers) ========== */
 
 #define MAPLE_REG_BASE  0x005F6C00
-#define MAPLE_DMA_ADDR  0x005F6C04
-#define MAPLE_DMA_START 0x005F6C10
-#define MAPLE_STATUS    0x005F6C18
+#define MAPLE_DMA_ADDR  0x005F6C04  /* SB_MDSTAR - DMA command table address */
+#define MAPLE_MDTSEL    0x005F6C10  /* SB_MDTSEL - DMA trigger select */
+#define MAPLE_MDEN      0x005F6C14  /* SB_MDEN - DMA enable */
+#define MAPLE_MDST      0x005F6C18  /* SB_MDST - DMA start/status */
+#define MAPLE_MSYS      0x005F6C80  /* SB_MSYS - Maple system control */
+#define MAPLE_MMSEL     0x005F6C8C  /* SB_MMSEL - Maple multi-select */
 
 /* Controller button masks */
 #define CONT_C          (1 << 0)
@@ -169,6 +172,7 @@ void dc_pvr_wait_vblank(DCHardware *hw);
 /* Controller operations */
 void dc_maple_init(DCHardware *hw);
 void dc_maple_poll(DCHardware *hw);
+void dc_maple_dma(DCHardware *hw, uint32_t mdstar);
 MapleController* dc_maple_get_controller(DCHardware *hw, int port);
 
 /* Sound operations */

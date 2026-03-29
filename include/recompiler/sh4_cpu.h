@@ -152,6 +152,11 @@ void sh4_set_cpu_ref(SH4CPU *cpu);
 /* Get raw memory pointers (for DMA) */
 uint8_t *sh4_get_ram_ptr(void);
 uint8_t *sh4_get_vram_ptr(void);
+uint32_t sh4_get_ram_size(void);
+uint32_t sh4_get_ram_mask(void);
+
+/* Get DMAC register value (for CH2-DMA etc.) */
+uint32_t sh4_get_dmac_reg(int idx);
 
 /* Memory access functions */
 uint8_t  sh4_read8(SH4CPU *cpu, uint32_t addr);

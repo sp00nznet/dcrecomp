@@ -33,6 +33,19 @@ uint8_t *sh4_get_vram_ptr(void) {
     return g_cpu_ref ? g_cpu_ref->vram : NULL;
 }
 
+uint32_t sh4_get_ram_size(void) {
+    return g_cpu_ref ? g_cpu_ref->ram_size : 0;
+}
+
+uint32_t sh4_get_ram_mask(void) {
+    return g_cpu_ref ? g_cpu_ref->ram_mask : 0;
+}
+
+uint32_t sh4_get_dmac_reg(int idx) {
+    if (!g_cpu_ref || idx < 0 || idx >= 17) return 0;
+    return g_cpu_ref->dmac_regs[idx];
+}
+
 void sh4_init_ex(SH4CPU *cpu, uint32_t ram_size) {
     memset(cpu, 0, sizeof(SH4CPU));
 

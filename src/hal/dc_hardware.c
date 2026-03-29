@@ -7,6 +7,7 @@
 
 #include "hal/dc_hardware.h"
 #include "hal/pvr2.h"
+#include "recompiler/sh4_cpu.h"
 #include "platform/platform.h"
 #include <stdlib.h>
 #include <string.h>
@@ -170,8 +171,8 @@ uint32_t dc_hw_read32(DCHardware *hw, uint32_t addr) {
 
 static int hw_write_log = 0;
 
-/* Forward declaration - needed for PVR DMA */
-extern uint8_t *sh4_get_ram_ptr(void);
+/* SH4 DMAC register indices (0xFFA00000 base, 4 bytes each) */
+#define DMAC_SAR2_IDX  8   /* Source Address Register ch2 (0xFFA00020) */
 
 void dc_hw_write32(DCHardware *hw, uint32_t addr, uint32_t val) {
     if (!hw) return;
@@ -262,13 +263,65 @@ void dc_hw_write32(DCHardware *hw, uint32_t addr, uint32_t val) {
 
     case SB_C2DST:
         if (val & 1) {
-            /* CH2-DMA: system RAM → PVR (TA FIFO or VRAM) */
+            /* CH2-DMA: SH4 DMAC Channel 2 → PVR (TA FIFO or VRAM)
+             * Source: SH4 DMAC SAR2 register (system RAM address)
+             * Dest:   SB_C2DSTAT (PVR address, default 0x10000000 = TA FIFO)
+             * Length: SB_C2DLEN */
             uint32_t c2d_dest = hw->hw_regs[hw_reg_idx(SB_C2DSTAT)];
             uint32_t c2d_len  = hw->hw_regs[hw_reg_idx(SB_C2DLEN)];
-            printf("[CH2-DMA] TRIGGER: dest=0x%08X len=%u\n", c2d_dest, c2d_len);
-            /* CH2-DMA source is implicitly from SB_C2DSTAT register chain */
-            /* For TA writes, the data comes from system RAM via descriptor list */
-            hw->sb_istnrm |= (1 << 19); /* DMA complete interrupt */
+            uint32_t c2d_src  = sh4_get_dmac_reg(DMAC_SAR2_IDX);
+            uint32_t ram_mask = sh4_get_ram_mask();
+
+            static int ch2_log = 0;
+            if (ch2_log < 20) {
+                ch2_log++;
+                printf("[CH2-DMA] TRIGGER: src=0x%08X dest=0x%08X len=%u\n",
+                       c2d_src, c2d_dest, c2d_len);
+            }
+
+            if (c2d_len > 0) {
+                uint8_t *ram = sh4_get_ram_ptr();
+                if (ram) {
+                    uint32_t src_offset = (c2d_src & 0x1FFFFFFF) & ram_mask;
+                    uint32_t dest_phys = c2d_dest & 0x1FFFFFFF;
+
+                    if (dest_phys >= 0x10000000 && dest_phys < 0x10800000) {
+                        /* DMA to TA FIFO — send as 32-byte packets */
+                        int packets = 0;
+                        for (uint32_t off = 0; off + 32 <= c2d_len; off += 32) {
+                            const uint32_t *pkt = (const uint32_t *)(ram + ((src_offset + off) & ram_mask));
+                            pvr2_ta_write(pkt);
+                            packets++;
+                        }
+                        if (ch2_log <= 20) {
+                            printf("[CH2-DMA] Sent %d packets (%u bytes) to TA FIFO\n",
+                                   packets, c2d_len);
+                        }
+                    } else if (dest_phys >= DC_VRAM_BASE && dest_phys < DC_VRAM_BASE + DC_VRAM_SIZE) {
+                        /* DMA to VRAM (texture upload) */
+                        uint8_t *vram = sh4_get_vram_ptr();
+                        if (vram) {
+                            uint32_t vram_offset = dest_phys - DC_VRAM_BASE;
+                            uint32_t copy_len = c2d_len;
+                            if (vram_offset + copy_len > DC_VRAM_SIZE)
+                                copy_len = DC_VRAM_SIZE - vram_offset;
+                            memcpy(vram + vram_offset, ram + src_offset, copy_len);
+                            if (ch2_log <= 20)
+                                printf("[CH2-DMA] Copied %u bytes to VRAM offset 0x%08X\n",
+                                       copy_len, vram_offset);
+                        }
+                    } else {
+                        if (ch2_log <= 20)
+                            printf("[CH2-DMA] Unknown dest 0x%08X (len=%u) - TODO\n",
+                                   c2d_dest, c2d_len);
+                    }
+                }
+            }
+
+            /* Update SB_C2DSTAT to reflect end position */
+            hw->hw_regs[hw_reg_idx(SB_C2DSTAT)] = c2d_dest + c2d_len;
+            hw->hw_regs[hw_reg_idx(SB_C2DLEN)] = 0;
+            hw->sb_istnrm |= (1 << 19); /* CH2-DMA complete interrupt */
             hw->hw_regs[hw_reg_idx(SB_C2DST)] = 0;
         }
         break;

@@ -250,6 +250,8 @@ uint16_t sh4_read16(SH4CPU *cpu, uint32_t addr) {
     return 0;
 }
 
+static uint32_t g_read_seq = 0;
+
 uint32_t sh4_read32(SH4CPU *cpu, uint32_t addr) {
     /* P4 control registers */
     if (addr >= 0xFF000000) {
@@ -314,6 +316,12 @@ uint32_t sh4_read32(SH4CPU *cpu, uint32_t addr) {
     }
 
     uint32_t phys = translate_addr(addr);
+
+    g_read_seq++;
+    if ((g_read_seq & 0x3FFFFF) == 0) {
+        printf("[HEARTBEAT] read32 #%uM addr=0x%08X pr=0x%08X\n",
+               g_read_seq >> 20, addr, cpu->pr);
+    }
 
     if (phys >= DC_RAM_BASE && phys < DC_RAM_BASE + cpu->ram_size) {
         return *(uint32_t *)(cpu->ram + (phys & cpu->ram_mask));

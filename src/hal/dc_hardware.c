@@ -108,16 +108,16 @@ uint32_t dc_hw_read32(DCHardware *hw, uint32_t addr) {
     /* Detect polling loops */
     if (phys == poll_last_addr) {
         poll_count++;
-        if (poll_count == 100 && poll_reported < 20) {
+        if (poll_count == 10 && poll_reported < 50) {
             poll_reported++;
-            printf("[POLL] register 0x%08X read 100+ times\n", phys);
+            printf("[POLL] register 0x%08X read 10+ times\n", phys);
         }
-        if (poll_count == 10000 && poll_reported < 30) {
+        if (poll_count == 1000 && poll_reported < 60) {
             poll_reported++;
-            printf("[POLL] register 0x%08X read 10000+ times — game is stuck!\n", phys);
+            printf("[POLL] register 0x%08X read 1000+ times — likely stuck\n", phys);
         }
     } else {
-        if (poll_count >= 100 && poll_reported < 30) {
+        if (poll_count >= 10 && poll_reported < 60) {
             poll_reported++;
             printf("[POLL] register 0x%08X polled %d times, moving to 0x%08X\n",
                    poll_last_addr, poll_count, phys);
@@ -314,8 +314,21 @@ void dc_hw_write32(DCHardware *hw, uint32_t addr, uint32_t val) {
                             printf("[CH2-DMA] Sent %d packets (%u bytes) to TA FIFO\n",
                                    packets, c2d_len);
                         }
+                    } else if (dest_phys >= 0x11000000 && dest_phys < 0x12000000) {
+                        /* DMA to TA texture path → VRAM write */
+                        uint8_t *vram = sh4_get_vram_ptr();
+                        if (vram) {
+                            uint32_t vram_offset = dest_phys - 0x11000000;
+                            uint32_t copy_len = c2d_len;
+                            if (vram_offset + copy_len > DC_VRAM_SIZE)
+                                copy_len = DC_VRAM_SIZE - vram_offset;
+                            memcpy(vram + vram_offset, ram + src_offset, copy_len);
+                            if (ch2_log <= 20)
+                                printf("[CH2-DMA] Texture upload: %u bytes to VRAM[0x%06X]\n",
+                                       copy_len, vram_offset);
+                        }
                     } else if (dest_phys >= DC_VRAM_BASE && dest_phys < DC_VRAM_BASE + DC_VRAM_SIZE) {
-                        /* DMA to VRAM (texture upload) */
+                        /* DMA to VRAM (direct) */
                         uint8_t *vram = sh4_get_vram_ptr();
                         if (vram) {
                             uint32_t vram_offset = dest_phys - DC_VRAM_BASE;
@@ -324,12 +337,12 @@ void dc_hw_write32(DCHardware *hw, uint32_t addr, uint32_t val) {
                                 copy_len = DC_VRAM_SIZE - vram_offset;
                             memcpy(vram + vram_offset, ram + src_offset, copy_len);
                             if (ch2_log <= 20)
-                                printf("[CH2-DMA] Copied %u bytes to VRAM offset 0x%08X\n",
+                                printf("[CH2-DMA] Direct VRAM: %u bytes to VRAM[0x%06X]\n",
                                        copy_len, vram_offset);
                         }
                     } else {
                         if (ch2_log <= 20)
-                            printf("[CH2-DMA] Unknown dest 0x%08X (len=%u) - TODO\n",
+                            printf("[CH2-DMA] Unknown dest 0x%08X (len=%u)\n",
                                    c2d_dest, c2d_len);
                     }
                 }

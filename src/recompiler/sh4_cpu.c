@@ -435,17 +435,28 @@ void sh4_write32(SH4CPU *cpu, uint32_t addr, uint32_t val) {
     uint32_t phys = translate_addr(addr);
 
     if (phys >= DC_RAM_BASE && phys < DC_RAM_BASE + cpu->ram_size) {
-        /* Protect allocator vtable pointer: keep default vtable (0x8C1733A4)
-         * The init code overwrites it with a free list node address, which
-         * breaks the vtable dispatch. Block the second write. */
+        /* Track writes to allocator vtable data */
+        if (phys == 0x0C1733A4) {
+            static int vt_data_log = 0;
+            if (vt_data_log < 5) {
+                vt_data_log++;
+                printf("[VTDATA] write 0x%08X to [0x0C1733A4] (from addr 0x%08X)\n", val, addr);
+            }
+        }
+        /* Track writes to allocator vtable pointer */
         if (phys == 0x0C2FB7A4) {
             static int wp_count = 0;
-            if (wp_count == 0) {
-                /* First write: allow (sets up default vtable) */
+            if (wp_count < 5) {
                 wp_count++;
-            } else {
-                /* Subsequent writes: block (would break vtable) */
-                return;
+                printf("[VTABLE] write #%d: 0x%08X → [0x0C2FB7A4]\n", wp_count, val);
+            }
+            /* Protect the default vtable pointer (0x8C1733A4).
+             * The init code tries to overwrite it with 0x8C2FB7A8 (free list sentinel)
+             * which is NOT a valid vtable. Only allow writes that set the known
+             * default vtable or clear to 0/0xFFFFFFFF. */
+            uint32_t cur = *(uint32_t *)(cpu->ram + (phys & cpu->ram_mask));
+            if (cur == 0x8C1733A4 && val != 0x8C1733A4 && val != 0 && val != 0xFFFFFFFF) {
+                return; /* Block: preserve default vtable */
             }
         }
         *(uint32_t *)(cpu->ram + (phys & cpu->ram_mask)) = val;

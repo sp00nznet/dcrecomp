@@ -343,6 +343,8 @@ void sh4_write8(SH4CPU *cpu, uint32_t addr, uint8_t val) {
     uint32_t phys = translate_addr(addr);
 
     if (phys >= DC_RAM_BASE && phys < DC_RAM_BASE + cpu->ram_size) {
+        /* Protect allocator vtable data from byte writes */
+        if (phys >= 0x0C1733A4 && phys <= 0x0C1733B3) return;
         cpu->ram[phys & cpu->ram_mask] = val;
         return;
     }
@@ -492,6 +494,19 @@ void sh4_write32(SH4CPU *cpu, uint32_t addr, uint32_t val) {
     uint32_t phys = translate_addr(addr);
 
     if (phys >= DC_RAM_BASE && phys < DC_RAM_BASE + cpu->ram_size) {
+        /* Protect allocator vtable data (4 function pointers at 0x0C1733A4-0x0C1733B0)
+         * These get corrupted by memset/memfill operations during init.
+         * The ROM values are the correct function pointers. */
+        if (phys >= 0x0C1733A4 && phys <= 0x0C1733B0) {
+            return; /* Block all writes to vtable data region */
+        }
+        /* Protect allocator vtable pointer */
+        if (phys == 0x0C2FB7A4) {
+            uint32_t cur = *(uint32_t *)(cpu->ram + (phys & cpu->ram_mask));
+            if (cur == 0x8C1733A4 && val != 0x8C1733A4 && val != 0 && val != 0xFFFFFFFF) {
+                return;
+            }
+        }
         *(uint32_t *)(cpu->ram + (phys & cpu->ram_mask)) = val;
         return;
     }

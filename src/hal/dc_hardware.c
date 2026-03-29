@@ -519,60 +519,89 @@ void dc_maple_dma(DCHardware *hw, uint32_t mdstar) {
             uint8_t *resp_bytes = (uint8_t *)resp;
             uint8_t *in_bytes = (uint8_t *)p_data;
 
-            /* Only bus 0 has devices. Write -1 for empty buses. */
-            if (bus != 0) {
+            /* Check if port has a connected device */
+            bool has_device = (port < 4) && hw->controller_connected[port];
+
+            /* Non-main-unit subdevices (reci & 0x1F != 0) or no device → -1 */
+            if (!has_device || (reci & 0x1F) != 0) {
                 resp[0] = (uint32_t)-1;
             } else {
+                MapleController *ctrl = &hw->controllers[port];
                 switch (command) {
-                case 0x01: /* MDC_DeviceRequest - get device info */
-                    /* MDRS_DeviceStatus (0x05), 28 words */
+                case 0x01: { /* MDC_DeviceRequest - get device info */
+                    /* MDRS_DeviceStatus (0x05), 28 words of device info */
                     resp[0] = 0x05 | (src_addr << 8) | (dst_addr << 16) | (0x1C << 24);
-                    resp[1] = 0x0E000000; /* ft0 = Naomi JAMMA (function type 0x0E) */
-                    resp[2] = 0x00000000;
-                    resp[3] = 0x00000000;
-                    resp[4] = 0x00000000; /* Function def block 0 */
+                    /* Function types: controller (bit 0) */
+                    resp[1] = 0x01000000; /* ft0 = Controller */
+                    resp[2] = 0x00000000; /* ft1 = none */
+                    resp[3] = 0x00000000; /* ft2 = none */
+                    /* Function definition block 0: controller capabilities
+                     * Bits[31:24] = 0xFF = all standard buttons
+                     * Bits[23:20] = 0x0  = R trigger present
+                     * Bits[19:16] = 0x6  = L trigger + analog axes */
+                    resp[4] = 0xFE060000;
                     resp[5] = 0x00000000;
                     resp[6] = 0x00000000;
-                    memset(&resp[7], 0x20, 84); /* pad rest with spaces */
-                    memcpy(&resp[7], "315-6149    SEGA ENTERPRISES", 28);
-                    memcpy(&resp[15], "Produced By or Under License From SEGA ENTERPRISES,LTD.", 56);
-                    resp[29] = 0x01AE; /* standby/max current */
+                    /* Product name (30 bytes) + license (60 bytes) + current */
+                    memset(&resp[7], 0x20, 84);
+                    memcpy(&resp[7], "Dreamcast Controller          ", 30);
+                    memcpy(&resp[15], "Produced By or Under License From SEGA ENTERPRISES,LTD.   ", 58);
+                    resp[29] = 0x01AE; /* standby 430mA / max 430mA */
                     break;
+                }
 
                 case 0x03: /* MDC_DeviceReset */
                     resp[0] = 0x07 | (src_addr << 8) | (dst_addr << 16) | (0x00 << 24);
                     break;
 
-                case 0x05: /* MDC_DeviceStatus (All Status) */
+                case 0x05: /* MDC_AllStatusReq */
                     resp[0] = 0x07 | (src_addr << 8) | (dst_addr << 16) | (0x00 << 24);
                     break;
 
-                case 0x09: /* Get Condition */
-                    resp[0] = 0x08 | (src_addr << 8) | (dst_addr << 16) | (0x01 << 24);
-                    resp[1] = 0x0E000000; /* ft = JAMMA */
+                case 0x09: { /* MDC_GetCondition */
+                    /* Request data[1] = function type to query */
+                    uint32_t func_type = p_data[1];
+                    if ((func_type & 0x01000000) || func_type == 0x01) {
+                        /* Controller condition: 3 data words */
+                        resp[0] = 0x08 | (src_addr << 8) | (dst_addr << 16) | (0x03 << 24);
+                        resp[1] = 0x01000000; /* ft = Controller */
+                        /* Condition data word 1:
+                         * bits[15:0] = buttons (active LOW - 0xFFFF = all released)
+                         * bits[23:16] = R trigger (0-255)
+                         * bits[31:24] = L trigger (0-255) */
+                        resp[2] = (uint32_t)ctrl->buttons
+                                | ((uint32_t)ctrl->rtrig << 16)
+                                | ((uint32_t)ctrl->ltrig << 24);
+                        /* Condition data word 2:
+                         * bits[7:0]   = joystick X (0=left, 128=center, 255=right)
+                         * bits[15:8]  = joystick Y (0=up, 128=center, 255=down)
+                         * bits[23:16] = joy2 X
+                         * bits[31:24] = joy2 Y */
+                        resp[3] = (uint32_t)(uint8_t)(ctrl->joyx + 128)
+                                | ((uint32_t)(uint8_t)(ctrl->joyy + 128) << 8)
+                                | ((uint32_t)(uint8_t)(ctrl->joy2x + 128) << 16)
+                                | ((uint32_t)(uint8_t)(ctrl->joy2y + 128) << 24);
+                    } else {
+                        resp[0] = (uint32_t)-1; /* Unknown function type */
+                    }
                     break;
+                }
 
+                /* === Naomi JVS commands (0x80+) === */
                 case 0x80: { /* MDC_JVSUploadFirmware */
-                    /* Accept firmware upload silently, respond with DeviceReply */
-                    /* Calculate checksum of input data */
                     uint8_t sum = 0;
                     for (uint32_t i = 4; i < plen * 4; i++)
                         sum += in_bytes[i];
-                    /* First response: echo command with checksum */
                     resp[0] = 0x80 | (src_addr << 8) | (dst_addr << 16) | (0x01 << 24);
                     resp[1] = (uint32_t)sum;
-                    /* Second response word: DeviceReply */
                     resp[2] = 0x07 | (src_addr << 8) | (dst_addr << 16) | (0x00 << 24);
                     break;
                 }
 
                 case 0x82: { /* MDC_JVSGetId */
-                    /* Return MIE board ID: "315-6149    COPYRIGHT SEGA ENTERPRISES CO,LTD.  1998" */
                     static const char MIE_ID[56] = "315-6149    COPYRIGHT SEGA ENTERPRISES CO,LTD.  1998";
-                    /* Part 1: first 28 bytes */
                     resp[0] = 0x83 | (src_addr << 8) | (dst_addr << 16) | (0x07 << 24);
                     memcpy(&resp[1], MIE_ID, 28);
-                    /* Part 2: next 20 bytes */
                     resp[8] = 0x83 | (src_addr << 8) | (dst_addr << 16) | (0x05 << 24);
                     memcpy(&resp[9], MIE_ID + 28, 20);
                     break;
@@ -580,46 +609,23 @@ void dc_maple_dma(DCHardware *hw, uint32_t mdstar) {
 
                 case 0x84: /* MDC_JVSSelfTest */
                     resp[0] = 0x85 | (src_addr << 8) | (dst_addr << 16) | (0x01 << 24);
-                    resp[1] = 0; /* test OK */
+                    resp[1] = 0;
                     break;
 
-                case 0x86: { /* MDC_JVSCommand - JVS I/O operations */
-                    uint8_t subcmd = in_bytes[4]; /* first byte after header */
+                case 0x86: { /* MDC_JVSCommand */
+                    uint8_t subcmd = in_bytes[4];
                     if (maple_log < 20) {
                         maple_log++;
                         printf("[JVS] subcmd=0x%02X\n", subcmd);
                     }
-
-                    switch (subcmd) {
-                    case 0x15: { /* Read controls */
-                        /* Response: 0x87, 14 words of control data */
+                    /* Generic OK response for all JVS subcommands */
+                    resp[0] = 0x87 | (src_addr << 8) | (dst_addr << 16) | (0x01 << 24);
+                    resp[1] = 0;
+                    if (subcmd == 0x15) {
+                        /* Read controls: return 14 words */
                         resp[0] = 0x87 | (src_addr << 8) | (dst_addr << 16) | (0x0E << 24);
-                        resp[1] = 0x00000001; /* status OK */
-                        /* System buttons: byte 0 = test/tilt, rest = player buttons */
-                        /* All buttons released */
+                        resp[1] = 0x00000001;
                         for (int i = 2; i <= 14; i++) resp[i] = 0;
-                        /* Coin counts at resp[6..7] */
-                        break;
-                    }
-
-                    case 0x01: /* EEPROM read init */
-                    case 0x03: /* EEPROM read */
-                    case 0x0B: /* EEPROM write */
-                        /* Acknowledge EEPROM operations */
-                        resp[0] = 0x87 | (src_addr << 8) | (dst_addr << 16) | (0x01 << 24);
-                        resp[1] = 0; /* OK */
-                        break;
-
-                    case 0x27: /* Transmit data to card reader */
-                    case 0x21: /* Card reader init */
-                        resp[0] = 0x87 | (src_addr << 8) | (dst_addr << 16) | (0x01 << 24);
-                        resp[1] = 0;
-                        break;
-
-                    default:
-                        resp[0] = 0x87 | (src_addr << 8) | (dst_addr << 16) | (0x01 << 24);
-                        resp[1] = 0; /* generic OK */
-                        break;
                     }
                     break;
                 }

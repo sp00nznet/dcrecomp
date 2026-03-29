@@ -97,6 +97,14 @@ uint32_t dc_hw_read32(DCHardware *hw, uint32_t addr) {
     /* Strip P2 area bits if present */
     uint32_t phys = addr & 0x1FFFFFFF;
 
+    /* Global read counter for heartbeat */
+    static uint64_t hw_read_count = 0;
+    hw_read_count++;
+    if ((hw_read_count & 0xFFFFFFF) == 0) {
+        printf("[HEARTBEAT] %llu HW reads, last=0x%08X\n",
+               (unsigned long long)hw_read_count, phys);
+    }
+
     /* Detect polling loops */
     if (phys == poll_last_addr) {
         poll_count++;
@@ -156,7 +164,16 @@ uint32_t dc_hw_read32(DCHardware *hw, uint32_t addr) {
         uint32_t vsync = (scanline >= 480) ? 1 : 0;  /* VSync during lines 480-524 */
         uint32_t blank = vsync;  /* Blank during VBlank */
         uint32_t fieldnum = (uint32_t)(now / 16) & 1; /* Alternate fields */
-        return (scanline & 0x3FF) | (fieldnum << 10) | (blank << 11) | (vsync << 13);
+        uint32_t result = (scanline & 0x3FF) | (fieldnum << 10) | (blank << 11) | (vsync << 13);
+        static int spg_log = 0;
+        static uint32_t spg_last = 0;
+        if (result != spg_last && spg_log < 20) {
+            spg_log++;
+            printf("[SPG] scanline=%u vsync=%u blank=%u field=%u val=0x%08X\n",
+                   scanline, vsync, blank, fieldnum, result);
+            spg_last = result;
+        }
+        return result;
     }
 
     default:

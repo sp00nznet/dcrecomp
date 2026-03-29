@@ -9,6 +9,7 @@
 #include "recompiler/sh4_cpu.h"
 #include "hal/dc_hardware.h"
 #include "hal/pvr2.h"
+#include "platform/platform.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -16,6 +17,9 @@
 /* External hardware reference (set during init) */
 static DCHardware *g_hardware = NULL;
 static SH4CPU *g_cpu_ref = NULL;
+
+/* TMU time base: set when TCNTn is written */
+static uint64_t tmu_write_time_ms[3] = {0, 0, 0};
 
 void sh4_set_hardware(DCHardware *hw) {
     g_hardware = hw;
@@ -259,8 +263,41 @@ uint32_t sh4_read32(SH4CPU *cpu, uint32_t addr) {
             if (idx < 17) return cpu->dmac_regs[idx];
         }
         if (addr >= 0xFFD80000 && addr <= 0xFFD8002F) {
+            /* TMU registers:
+             * 0xFFD80000: TOCR, 0xFFD80004: TSTR
+             * 0xFFD80008: TCOR0, 0xFFD8000C: TCNT0, 0xFFD80010: TCR0
+             * 0xFFD80014: TCOR1, 0xFFD80018: TCNT1, 0xFFD8001C: TCR1
+             * 0xFFD80020: TCOR2, 0xFFD80024: TCNT2, 0xFFD80028: TCR2 */
             uint32_t idx = (addr - 0xFFD80000) / 4;
-            if (idx < 12) return cpu->tmu_regs[idx];
+            if (idx < 12) {
+                /* For TCNT0/1/2 (indices 3, 6, 9): simulate countdown.
+                 * Naomi Pclk = 50MHz. With prescaler /4 (TCR default),
+                 * timer ticks at 12.5MHz = 12500 ticks/ms. */
+                if (idx == 3 || idx == 6 || idx == 9) {
+                    int ch = (idx == 3) ? 0 : (idx == 6) ? 1 : 2;
+                    uint64_t now = platform_get_ticks_ms();
+                    uint64_t base = tmu_write_time_ms[ch];
+                    if (base == 0) base = now; /* first read before any write */
+                    uint64_t elapsed_ms = now - base;
+                    /* Decrement by elapsed ticks (12500 per ms for ~50MHz/4) */
+                    uint64_t ticks64 = elapsed_ms * 12500;
+                    uint32_t val = cpu->tmu_regs[idx];
+                    if (ticks64 >= (uint64_t)val) {
+                        /* Timer underflowed - reload and reset time base */
+                        uint32_t reload = cpu->tmu_regs[idx - 1]; /* TCORn */
+                        if (reload == 0) reload = 0xFFFFFFFF;
+                        cpu->tmu_regs[idx] = reload;
+                        tmu_write_time_ms[ch] = now;
+                    }
+                    /* Return the stored value minus elapsed (computed on the fly) */
+                    uint32_t result = cpu->tmu_regs[idx];
+                    if (ticks64 < (uint64_t)result) {
+                        result -= (uint32_t)ticks64;
+                    }
+                    return result;
+                }
+                return cpu->tmu_regs[idx];
+            }
         }
         return 0;
     }
@@ -436,7 +473,14 @@ void sh4_write32(SH4CPU *cpu, uint32_t addr, uint32_t val) {
             }
             if (addr >= 0xFFD80000 && addr <= 0xFFD8002F) {
                 uint32_t idx = (addr - 0xFFD80000) / 4;
-                if (idx < 12) cpu->tmu_regs[idx] = val;
+                if (idx < 12) {
+                    cpu->tmu_regs[idx] = val;
+                    /* Reset time base when TCNTn is written */
+                    if (idx == 3 || idx == 6 || idx == 9) {
+                        int ch = (idx == 3) ? 0 : (idx == 6) ? 1 : 2;
+                        tmu_write_time_ms[ch] = platform_get_ticks_ms();
+                    }
+                }
                 return;
             }
             return;

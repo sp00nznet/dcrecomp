@@ -156,6 +156,12 @@ uint32_t dc_hw_read32(DCHardware *hw, uint32_t addr) {
     case PVR_FB_ADDR2:
         return hw->pvr_fb_addr2;
 
+    case 0x005F688C: { /* SB_FFST - FIFO Status (always report empty/ready) */
+        static int ffst_log = 0;
+        if (ffst_log < 3) { ffst_log++; printf("[FFST] returning 0\n"); }
+        return 0;
+    }
+
     case 0x005F810C: { /* SPG_STATUS - sync pulse generator status */
         /* Simulate scanline counter progressing at ~31.5kHz (525 lines per frame @ 60Hz) */
         uint64_t now = platform_get_ticks_ms();

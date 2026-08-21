@@ -457,6 +457,12 @@ uint32_t sh4_read32(SH4CPU *cpu, uint32_t addr) {
                (unsigned long long)g_irq_delivered,
                (unsigned long long)g_irq_reentrant,
                (unsigned long long)g_irq_masked);
+        /* Set DCRECOMP_STACK_TRACE=1 to get the recompiled call chain with
+         * each heartbeat. Symbol resolution is slow enough to distort timing,
+         * so it stays off unless asked for. */
+        static int trace = -1;
+        if (trace < 0) trace = getenv("DCRECOMP_STACK_TRACE") ? 1 : 0;
+        if (trace) sh4_dump_native_stack("heartbeat");
     }
 
     if (phys >= DC_RAM_BASE && phys < DC_RAM_BASE + cpu->ram_size) {

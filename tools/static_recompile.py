@@ -143,8 +143,14 @@ class SH4Recompiler:
             # Look for JMP @Rn (0100nnnn00101011) or JSR @Rn (0100nnnn00001011)
             if (op & 0xF0FF) == 0x400B or (op & 0xF0FF) == 0x402B:
                 rn = (op >> 8) & 0xF
-                # Look back for mov.l @(disp,PC), Rn to find the target
-                for j in range(max(0, i - 20), i, 2):
+                # Look back for mov.l @(disp,PC), Rn to find the target.
+                # Nearest first: a run of consecutive load/call pairs is the
+                # normal shape of an SDK init sequence, and scanning forwards
+                # matched an earlier pair's load every time - which silently
+                # dropped the last target in every such run.
+                for j in range(i - 2, max(-2, i - 22), -2):
+                    if j < 0:
+                        break
                     prev = self.data[j] | (self.data[j+1] << 8)
                     if (prev & 0xF000) == 0xD000 and ((prev >> 8) & 0xF) == rn:
                         disp = prev & 0xFF

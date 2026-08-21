@@ -31,6 +31,7 @@ class SH4Recompiler:
 
     def __init__(self, binary_data, base_addr=LOAD_ADDR):
         self.data = binary_data
+        self.entry_hints = set()
         self.base = base_addr
         self.size = len(binary_data)
         self.functions = {}
@@ -181,6 +182,10 @@ class SH4Recompiler:
 
         print(f"Found {len(self.functions)} functions")
 
+        # Addresses reached by a direct jump. Used to keep the instruction
+        # walk in step when a literal pool decodes as a branch.
+        self.entry_hints = self._mova_targets() | self._external_branch_targets()
+
         self._resolve_mid_entries()
 
     def _resolve_mid_entries(self):
@@ -213,7 +218,7 @@ class SH4Recompiler:
                 v |= 0x80000000
             if self.base <= v < self.base + self.size and (v & 1) == 0:
                 candidates.add(v)
-        candidates |= self._external_branch_targets()
+        candidates |= self.entry_hints
         candidates -= set(self.functions)
 
         starts = sorted(self.functions)
@@ -265,7 +270,41 @@ class SH4Recompiler:
                 if is_branch and isinstance(target, int):
                     if not (addr <= target < info['end']):
                         targets.add(target)
-                offset += 4 if has_delay else 2
+                offset += 4 if self._takes_delay_slot(offset, has_delay) else 2
+        return targets
+
+    def _takes_delay_slot(self, offset, has_delay):
+        """Whether the word after a delay-slot branch really is its delay slot.
+
+        False when that address is something the program jumps to directly - a
+        known entry point cannot also be a delay slot, and treating it as one
+        desynchronises the walk through a mis-decoded literal pool.
+        """
+        if not has_delay:
+            return False
+        return self.offset_to_addr(offset + 2) not in self.entry_hints
+
+    def _mova_targets(self):
+        """Addresses produced by MOVA @(disp,PC),R0.
+
+        SDK code reaches its cache and store-queue routines through a P1->P2
+        trampoline: MOVA to get the address of the following code, OR in
+        0xA0000000 to make it uncached, then JMP. The target is computed at
+        runtime from a PC-relative displacement, so neither the literal-pool
+        scan nor the branch scan sees it - the jump lands on an address with no
+        entry point, gets skipped, and the routine's epilogue never runs. One
+        of those leaked four bytes of stack per call.
+
+        MOVA is also used to address data (jump tables, string literals). Those
+        candidates are dropped by the emittable filter or, if they survive it,
+        cost one switch case that nothing ever calls.
+        """
+        targets = set()
+        for offset in range(0, self.size - 1, 2):
+            opcode = self.read_u16(offset)
+            if (opcode & 0xFF00) == 0xC700:      # MOVA @(disp,PC), R0
+                pc = self.offset_to_addr(offset)
+                targets.add((((pc + 4) & 0xFFFFFFFC) + (opcode & 0xFF) * 4))
         return targets
 
     def _emittable_addrs(self, start_addr, end_addr):
@@ -284,7 +323,7 @@ class SH4Recompiler:
             opcode = self.read_u16(offset)
             _, _, _, has_delay = self.recompile_instruction(opcode,
                                                            self.offset_to_addr(offset))
-            offset += 4 if has_delay else 2
+            offset += 4 if self._takes_delay_slot(offset, has_delay) else 2
         return out
 
     def recompile_instruction(self, opcode, pc):
@@ -939,7 +978,7 @@ class SH4Recompiler:
             if is_branch and isinstance(target, int):
                 if func_addr <= target < func_info['end']:
                     branch_targets.add(target)
-            if has_delay:
+            if self._takes_delay_slot(offset, has_delay):
                 # Delay slot instruction is also emittable
                 if offset + 2 < func_end:
                     emittable_addrs.add(self.offset_to_addr(offset + 2))
@@ -1012,8 +1051,22 @@ class SH4Recompiler:
                 offset += 2
                 continue
 
+            # An rts whose delay slot is the first instruction of the next
+            # function still has to execute it and return. Without this the rts
+            # degrades to a comment and control falls through into that
+            # function on someone else's stack frame.
+            if (target == "rts" and has_delay
+                    and offset + 2 >= func_end and offset + 2 < self.size):
+                delay_pc = self.offset_to_addr(offset + 2)
+                delay_code, _, _, _ = self.recompile_instruction(
+                    self.read_u16(offset + 2), delay_pc)
+                lines.append(f"    {delay_code} /* delay slot, across boundary */")
+                lines.append(f"    return; /* rts */")
+                offset += 4
+                continue
+
             # Handle delay slots for branch instructions
-            if has_delay and offset + 2 < func_end:
+            if self._takes_delay_slot(offset, has_delay) and offset + 2 < func_end:
                 delay_opcode = self.read_u16(offset + 2)
                 delay_pc = self.offset_to_addr(offset + 2)
                 delay_code, _, _, _ = self.recompile_instruction(delay_opcode, delay_pc)
@@ -1026,8 +1079,13 @@ class SH4Recompiler:
                 if target == "rts":
                     lines.append(f"    {delay_code} /* delay slot */")
                     lines.append(f"    return; /* rts */")
-                elif isinstance(target, int) and target in self.call_targets:
-                    # BSR to a function
+                elif isinstance(target, int) and "bsr" in code:
+                    # BSR - a real call, so control returns here afterwards.
+                    # Classify by the instruction, never by whether the target
+                    # happens to be BSR'd from somewhere else in the binary: a
+                    # BRA to a shared helper is a tail jump, and emitting it as
+                    # a call makes execution fall through into whatever the
+                    # assembler happened to place next.
                     lines.append(f"    {delay_code} /* delay slot */")
                     lines.append(f"    func_{target:08X}(cpu); /* bsr */")
                 elif is_local:
@@ -1197,11 +1255,16 @@ class SH4Recompiler:
             f.write("     * a branch target with no entry point, stubbed out so the\n")
             f.write("     * epilogue that would have popped them never runs. */\n")
             f.write("    if (fn) {\n")
-            f.write("        uint32_t saved[7];\n")
-            f.write("        for (int i = 8; i <= 14; i++) saved[i - 8] = cpu->r[i];\n")
+            f.write("        uint32_t saved[8];\n")
+            f.write("        for (int i = 8; i <= 15; i++) saved[i - 8] = cpu->r[i];\n")
             f.write("        uint32_t target = cpu->pc, from = cpu->pr;\n")
             f.write("        fn(cpu);\n")
             f.write("        static int abi_log = 0;\n")
+            f.write("        if (cpu->r[15] != saved[7] && abi_log < 50) {\n")
+            f.write("            abi_log++;\n")
+            f.write("            printf(\"[ABI] func_%08X (from 0x%08X) left the stack unbalanced: SP %08X -> %08X\\n\",\n")
+            f.write("                   target | 0x80000000u, from, saved[7], cpu->r[15]);\n")
+            f.write("        }\n")
             f.write("        for (int i = 8; i <= 14 && abi_log < 50; i++) {\n")
             f.write("            if (cpu->r[i] != saved[i - 8]) {\n")
             f.write("                abi_log++;\n")

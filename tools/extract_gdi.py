@@ -138,6 +138,7 @@ def extract_directory(f, abs_lba, size, output_dir, prefix=""):
 def main():
     track3_path = sys.argv[1] if len(sys.argv) > 1 else "Crazy Taxi (USA) (Track 3).bin"
     output_dir = sys.argv[2] if len(sys.argv) > 2 else "disc_extract"
+    os.makedirs(output_dir, exist_ok=True)
 
     file_size = os.path.getsize(track3_path)
     total_sectors = file_size // SECTOR_SIZE_RAW

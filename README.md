@@ -170,9 +170,13 @@ See Mushiking (kingofbeetle) as a reference implementation.
 
 ## Credits & prior art
 
-dcrecomp is the only Dreamcast/Naomi static recompiler we're aware of, but it
-stands on work others did first. If you use any of it, credit them too.
+dcrecomp stands on work others did first. If you use any of it, credit them too.
 
+- **[KatanaRecomp](https://github.com/sonicfreak1337/KatanaRecomp)**
+  (sonicfreak1337) - the other Dreamcast static recompiler, and further along:
+  SH-4 to native C++ through an IR, targeting Sonic Adventure, with movie
+  playback and early stage loading working. Worth reading before assuming
+  anything here is novel.
 - **[Flycast](https://github.com/flyinghead/flycast)** (flyinghead, GPLv2) - the
   reference for how Dreamcast hardware actually behaves. dcrecomp ships no
   Flycast code, but the PVR2/Holly/AICA register semantics implemented here were

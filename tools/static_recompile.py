@@ -181,6 +181,81 @@ class SH4Recompiler:
 
         print(f"Found {len(self.functions)} functions")
 
+        self._resolve_mid_entries()
+
+    def _resolve_mid_entries(self):
+        """Find entry points that land inside an existing function.
+
+        Indirect calls through function pointers stored in RAM (vtables,
+        callback tables, jump tables) cannot be resolved by looking at the code
+        around the JSR - the target is only a value at runtime. But the value
+        usually comes from a pointer table that is in the binary already, so
+        scanning the data for words that look like code addresses finds most of
+        them.
+
+        These are NOT added as function boundaries. Splitting a function at an
+        arbitrary address breaks any loop that spans the split, because a
+        backward branch across the new boundary stops being a local goto. They
+        are recorded per containing function instead, and recompile_function
+        emits a shared implementation with a goto dispatch at the top.
+
+        False positives are cheap here: an address that is not a real
+        instruction boundary is dropped below, and one that is costs a switch
+        case and a one-line wrapper that nothing ever calls.
+        """
+        import bisect
+
+        candidates = set()
+        for off in range(0, self.size - 3, 4):
+            v = (self.data[off] | (self.data[off + 1] << 8) |
+                 (self.data[off + 2] << 16) | (self.data[off + 3] << 24))
+            if 0x0C000000 <= v < 0x0D000000:
+                v |= 0x80000000
+            if self.base <= v < self.base + self.size and (v & 1) == 0:
+                candidates.add(v)
+        candidates -= set(self.functions)
+
+        starts = sorted(self.functions)
+        by_func = {}
+        for addr in candidates:
+            i = bisect.bisect_right(starts, addr) - 1
+            if i < 0:
+                continue
+            owner = starts[i]
+            if addr < self.functions[owner]['end']:
+                by_func.setdefault(owner, []).append(addr)
+
+        self.mid_entries = {}
+        for owner, addrs in by_func.items():
+            emittable = self._emittable_addrs(owner, self.functions[owner]['end'])
+            keep = sorted(a for a in addrs if a in emittable)
+            if keep:
+                self.mid_entries[owner] = keep
+
+        self.mid_entry_addrs = {a for v in self.mid_entries.values() for a in v}
+        print(f"Found {len(self.mid_entry_addrs)} mid-function entry points "
+              f"in {len(self.mid_entries)} functions "
+              f"({len(candidates)} candidates scanned)")
+
+    def _emittable_addrs(self, start_addr, end_addr):
+        """Addresses inside [start,end) that begin an emitted instruction.
+
+        Walks the same way recompile_function does, so delay slots and the
+        insides of literal pools are excluded.
+        """
+        out = set()
+        offset = self.addr_to_offset(start_addr)
+        end = self.addr_to_offset(end_addr)
+        if offset < 0 or end > self.size:
+            return out
+        while offset < end - 1:
+            out.add(self.offset_to_addr(offset))
+            opcode = self.read_u16(offset)
+            _, _, _, has_delay = self.recompile_instruction(opcode,
+                                                           self.offset_to_addr(offset))
+            offset += 4 if has_delay else 2
+        return out
+
     def recompile_instruction(self, opcode, pc):
         """
         Translate a single SH-4 instruction to C code.
@@ -851,9 +926,25 @@ class SH4Recompiler:
         # (needed for self-tail-call → goto conversion to avoid stack overflow)
         local_labels.add(func_addr)
 
+        # Mid-function entry points (see _resolve_mid_entries). Rather than
+        # splitting the function - which would turn backward branches across the
+        # split into calls that re-enter from the top - the body is emitted once
+        # and each entry gets a wrapper that jumps straight to its label.
+        mids = [a for a in getattr(self, 'mid_entries', {}).get(func_addr, ())
+                if a in emittable_addrs and a != func_addr]
+        local_labels |= set(mids)
+
         # Second pass: generate C code
         lines = []
-        lines.append(f"void {func_name}(SH4CPU *cpu) {{")
+        if mids:
+            lines.append(f"static void impl_{func_addr:08X}(SH4CPU *cpu, uint32_t entry) {{")
+            lines.append("    switch (entry) {")
+            for a in mids:
+                lines.append(f"    case 0x{a:08X}u: goto L_{a:08X};")
+            lines.append("    default: break;")
+            lines.append("    }")
+        else:
+            lines.append(f"void {func_name}(SH4CPU *cpu) {{")
 
         # Track which labels we've actually emitted
         emitted_labels = set()
@@ -983,6 +1074,12 @@ class SH4Recompiler:
 
         lines.append("}")
 
+        if mids:
+            lines.append("")
+            lines.append(f"void {func_name}(SH4CPU *cpu) {{ impl_{func_addr:08X}(cpu, 0x{func_addr:08X}u); }}")
+            for a in mids:
+                lines.append(f"void func_{a:08X}(SH4CPU *cpu) {{ impl_{func_addr:08X}(cpu, 0x{a:08X}u); }}")
+
         # Post-process: replace any goto to non-existent labels with function calls
         import re
         result_lines = []
@@ -1013,7 +1110,7 @@ class SH4Recompiler:
             f.write("void sh4_jump_indirect(SH4CPU *cpu);\n\n")
             f.write(f"/* {len(self.functions)} recompiled functions */\n")
 
-            for addr in sorted(self.functions.keys()):
+            for addr in sorted(set(self.functions) | getattr(self, "mid_entry_addrs", set())):
                 f.write(f"void func_{addr:08X}(SH4CPU *cpu);\n")
 
             f.write("\n#endif /* GAME_FUNCTIONS_H */\n")
@@ -1031,12 +1128,12 @@ class SH4Recompiler:
             f.write("} FuncEntry;\n\n")
 
             f.write(f"static const FuncEntry func_table[] = {{\n")
-            for addr in sorted(self.functions.keys()):
+            for addr in sorted(set(self.functions) | getattr(self, "mid_entry_addrs", set())):
                 f.write(f"    {{ 0x{addr:08X}u, func_{addr:08X} }},\n")
             f.write(f"    {{ 0, NULL }}\n")
             f.write("};\n\n")
 
-            f.write(f"#define FUNC_TABLE_SIZE {len(self.functions)}\n\n")
+            f.write(f"#define FUNC_TABLE_SIZE {len(set(self.functions) | getattr(self, 'mid_entry_addrs', set()))}\n\n")
 
             # Binary search dispatch
             f.write("static void (*find_function(uint32_t addr))(SH4CPU *cpu) {\n")
@@ -1065,8 +1162,9 @@ class SH4Recompiler:
             f.write("    }\n")
             f.write("    if (fn) { fn(cpu); }\n")
             f.write("    else {\n")
-            f.write("        /* BIOS/Boot ROM calls & null pointers - no-op */\n")
-            f.write("        if (phys < 0x00200000) return;\n")
+            f.write("        /* BIOS/Boot ROM calls and null pointers are a no-op, but still\n")
+            f.write("         * log them: a silently skipped callback is the classic cause of\n")
+            f.write("         * a spin loop it was supposed to break. */\n")
             f.write("        if (unresolved_log < 100) {\n")
             f.write("            unresolved_log++;\n")
             f.write("            printf(\"[DISPATCH] unresolved call to 0x%08X (pr=0x%08X)\\n\",\n")
@@ -1158,6 +1256,7 @@ def main():
 
     print(f"\nStatic recompilation complete!")
     print(f"  Functions: {len(recompiler.functions)}")
+    print(f"  Mid-function entries: {len(getattr(recompiler, 'mid_entry_addrs', ()))}")
     print(f"  Source files: {num_files}")
     print(f"  Output: {output_dir}/")
 

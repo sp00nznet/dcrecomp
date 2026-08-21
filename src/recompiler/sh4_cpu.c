@@ -44,14 +44,32 @@ typedef struct {
 static void (*g_irq_handler)(SH4CPU *cpu) = NULL;
 static uint64_t g_last_vblank_ms = 0;
 static bool g_in_irq = false;
+static uint64_t g_irq_delivered = 0;
+static uint64_t g_irq_reentrant = 0;   /* skipped because a handler was running */
+static uint64_t g_irq_masked = 0;      /* skipped because SR.BL or SR.IMASK blocked it */
 
 void sh4_set_irq_handler(void (*handler)(SH4CPU *cpu)) {
     g_irq_handler = handler;
     printf("[IRQ] handler %s\n", handler ? "registered" : "cleared");
 }
 
+/* Which IRL level Holly is routing VBlank-IN to, per SB_IML6/4/2NRM.
+ * Zero means the game has not routed it anywhere, so nothing should fire. */
+static int vblank_irl_level(void) {
+    const uint32_t VBL_IN = 1u << 3;
+    if (dc_hw_read32(g_hardware, SB_IML6NRM) & VBL_IN) return 6;
+    if (dc_hw_read32(g_hardware, SB_IML4NRM) & VBL_IN) return 4;
+    if (dc_hw_read32(g_hardware, SB_IML2NRM) & VBL_IN) return 2;
+    return 0;
+}
+
 void sh4_poll_irq(SH4CPU *cpu) {
-    if (!g_hardware || g_in_irq) return;
+    if (!g_hardware) return;
+    /* ponytail: no nested interrupts. Hardware allows a handler that lowers
+     * SR.IMASK to be interrupted again; we just drop the second one, which
+     * costs a frame at worst. If a handler ever needs to wait on a later
+     * interrupt, this guard is what deadlocks and this is where to fix it. */
+    if (g_in_irq) { g_irq_reentrant++; return; }
 
     uint64_t now = platform_get_ticks_ms();
     if (g_last_vblank_ms == 0) g_last_vblank_ms = now;
@@ -60,6 +78,16 @@ void sh4_poll_irq(SH4CPU *cpu) {
 
     dc_pvr_wait_vblank(g_hardware);            /* raises SB_ISTNRM VBlank-IN */
     if (!g_irq_handler) return;
+
+    /* Respect the CPU's own masking. Delivering into a critical section the
+     * game had closed leaves it re-entered halfway through its own bookkeeping,
+     * which is exactly as broken as it sounds. SR.BL blocks everything; SR.IMASK
+     * blocks any level at or below it. The interrupt stays pending in
+     * SB_ISTNRM and gets delivered on a later poll. */
+    int level = vblank_irl_level();
+    if (level == 0) { g_irq_masked++; return; }
+    if (cpu->sr & SR_BL) { g_irq_masked++; return; }
+    if ((int)((cpu->sr & SR_IMASK) >> 4) >= level) { g_irq_masked++; return; }
 
     SH4IrqFrame f;
     memcpy(f.r, cpu->r, sizeof f.r);
@@ -70,6 +98,7 @@ void sh4_poll_irq(SH4CPU *cpu) {
     memcpy(f.xf, cpu->xf, sizeof f.xf);
 
     g_in_irq = true;
+    g_irq_delivered++;
     g_irq_handler(cpu);
     g_in_irq = false;
 
@@ -383,8 +412,11 @@ uint32_t sh4_read32(SH4CPU *cpu, uint32_t addr) {
      * checks/sec, far denser than the 60Hz boundary we need to catch. */
     if ((g_read_seq & 0xFFFF) == 0) sh4_poll_irq(cpu);
     if ((g_read_seq & 0x3FFFFF) == 0) {
-        printf("[HEARTBEAT] read32 #%uM addr=0x%08X pr=0x%08X\n",
-               g_read_seq >> 20, addr, cpu->pr);
+        printf("[HEARTBEAT] read32 #%uM addr=0x%08X pr=0x%08X sr=0x%08X irq=%llu reent=%llu masked=%llu\n",
+               g_read_seq >> 20, addr, cpu->pr, cpu->sr,
+               (unsigned long long)g_irq_delivered,
+               (unsigned long long)g_irq_reentrant,
+               (unsigned long long)g_irq_masked);
     }
 
     if (phys >= DC_RAM_BASE && phys < DC_RAM_BASE + cpu->ram_size) {

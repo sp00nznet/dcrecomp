@@ -133,16 +133,10 @@ uint32_t dc_hw_read32(DCHardware *hw, uint32_t addr) {
     case PVR_REVISION:
         return 0x00000011;  /* Revision 1.1 */
 
-    case SB_ISTNRM: {
-        /* Auto-generate VBlank signal based on timing (~60Hz) */
-        uint64_t now = platform_get_ticks_ms();
-        if (now - hw->last_vblank_time >= 16) {
-            hw->sb_istnrm |= (1 << 3);  /* VBlank-IN */
-            hw->last_vblank_time = now;
-            hw->vblank_count++;
-        }
+    case SB_ISTNRM:
+        /* VBlank is raised by sh4_poll_irq, which owns the 60Hz clock.
+         * Generating it here as well gave us two competing timebases. */
         return hw->sb_istnrm;
-    }
 
     case SB_ISTEXT:
         return hw->sb_istext;

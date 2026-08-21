@@ -168,6 +168,26 @@ void     sh4_write16(SH4CPU *cpu, uint32_t addr, uint16_t val);
 void     sh4_write32(SH4CPU *cpu, uint32_t addr, uint32_t val);
 void     sh4_write_float(SH4CPU *cpu, uint32_t addr, float val);
 
+/* ========== Interrupt delivery ==========
+ *
+ * Statically recompiled code has no exception path. A game's IRQ vector at
+ * VBR+0x600 is typically a trampoline copied into low RAM at boot, so the
+ * recompiler never sees it and the handler behind it is never reached.
+ *
+ * Instead the game registers its dispatcher here, and dcrecomp calls it from
+ * a safe point between memory accesses at ~60Hz. Without this, any game that
+ * waits on a counter incremented by its VBlank ISR deadlocks during init.
+ *
+ * Pass NULL to disable dispatch; VBlank is still raised in SB_ISTNRM either
+ * way, so code that polls the register instead of using interrupts still works.
+ */
+void sh4_set_irq_handler(void (*handler)(SH4CPU *cpu));
+
+/* Raise VBlank on a ~60Hz wall-clock boundary and, if one is registered,
+ * run the game's IRQ handler. Called automatically from sh4_read32; exposed
+ * so a host main loop can also pump it explicitly. */
+void sh4_poll_irq(SH4CPU *cpu);
+
 /* SR T-bit helpers */
 static inline bool sh4_get_t(SH4CPU *cpu) { return (cpu->sr & SR_T) != 0; }
 static inline void sh4_set_t(SH4CPU *cpu, bool v) {

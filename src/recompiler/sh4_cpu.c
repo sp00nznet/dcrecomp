@@ -21,6 +21,66 @@ static SH4CPU *g_cpu_ref = NULL;
 /* TMU time base: set when TCNTn is written */
 static uint64_t tmu_write_time_ms[3] = {0, 0, 0};
 
+/* ========== Interrupt delivery ==========
+ *
+ * See sh4_cpu.h. The handler is called from sh4_read32, i.e. between the
+ * memory accesses of recompiled code rather than between SH-4 instructions.
+ * That is close enough to hardware, with one catch: recompiled code keeps all
+ * live state in cpu->r[] instead of C locals, so a handler that runs mid
+ * sequence would clobber whatever function it interrupted. Real hardware
+ * avoids this by banking r0-r7 on interrupt entry. We save and restore the
+ * whole architectural register file, which covers the banked half plus r8-r15
+ * and the FP state.
+ *
+ * Deliberately NOT saved: dmac_regs, tmu_regs, sq/qacr, cycles and running.
+ * Those are hardware side effects the handler is supposed to leave behind.
+ */
+typedef struct {
+    uint32_t r[16];
+    uint32_t pr, sr, gbr, mach, macl, fpul, fpscr;
+    float fr[16], xf[16];
+} SH4IrqFrame;
+
+static void (*g_irq_handler)(SH4CPU *cpu) = NULL;
+static uint64_t g_last_vblank_ms = 0;
+static bool g_in_irq = false;
+
+void sh4_set_irq_handler(void (*handler)(SH4CPU *cpu)) {
+    g_irq_handler = handler;
+    printf("[IRQ] handler %s\n", handler ? "registered" : "cleared");
+}
+
+void sh4_poll_irq(SH4CPU *cpu) {
+    if (!g_hardware || g_in_irq) return;
+
+    uint64_t now = platform_get_ticks_ms();
+    if (g_last_vblank_ms == 0) g_last_vblank_ms = now;
+    if (now - g_last_vblank_ms < 16) return;   /* ~60Hz */
+    g_last_vblank_ms = now;
+
+    dc_pvr_wait_vblank(g_hardware);            /* raises SB_ISTNRM VBlank-IN */
+    if (!g_irq_handler) return;
+
+    SH4IrqFrame f;
+    memcpy(f.r, cpu->r, sizeof f.r);
+    f.pr = cpu->pr; f.sr = cpu->sr; f.gbr = cpu->gbr;
+    f.mach = cpu->mach; f.macl = cpu->macl;
+    f.fpul = cpu->fpul; f.fpscr = cpu->fpscr;
+    memcpy(f.fr, cpu->fr, sizeof f.fr);
+    memcpy(f.xf, cpu->xf, sizeof f.xf);
+
+    g_in_irq = true;
+    g_irq_handler(cpu);
+    g_in_irq = false;
+
+    memcpy(cpu->r, f.r, sizeof f.r);
+    cpu->pr = f.pr; cpu->sr = f.sr; cpu->gbr = f.gbr;
+    cpu->mach = f.mach; cpu->macl = f.macl;
+    cpu->fpul = f.fpul; cpu->fpscr = f.fpscr;
+    memcpy(cpu->fr, f.fr, sizeof f.fr);
+    memcpy(cpu->xf, f.xf, sizeof f.xf);
+}
+
 void sh4_set_hardware(DCHardware *hw) {
     g_hardware = hw;
 }
@@ -318,6 +378,10 @@ uint32_t sh4_read32(SH4CPU *cpu, uint32_t addr) {
     uint32_t phys = translate_addr(addr);
 
     g_read_seq++;
+    /* ponytail: cheap counter gate first - polling the clock on every read
+     * costs more than the interrupt it is looking for. 64K reads is ~300
+     * checks/sec, far denser than the 60Hz boundary we need to catch. */
+    if ((g_read_seq & 0xFFFF) == 0) sh4_poll_irq(cpu);
     if ((g_read_seq & 0x3FFFFF) == 0) {
         printf("[HEARTBEAT] read32 #%uM addr=0x%08X pr=0x%08X\n",
                g_read_seq >> 20, addr, cpu->pr);

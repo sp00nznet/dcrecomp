@@ -188,6 +188,11 @@ void sh4_set_irq_handler(void (*handler)(SH4CPU *cpu));
  * so a host main loop can also pump it explicitly. */
 void sh4_poll_irq(SH4CPU *cpu);
 
+/* Print a native backtrace. Recompiled functions are real C functions, so
+ * this is the SH-4 call chain - unlike cpu->pr, which only moves on
+ * indirect branches. Needs debug info to resolve names. */
+void sh4_dump_native_stack(const char *tag);
+
 /* SR T-bit helpers */
 static inline bool sh4_get_t(SH4CPU *cpu) { return (cpu->sr & SR_T) != 0; }
 static inline void sh4_set_t(SH4CPU *cpu, bool v) {

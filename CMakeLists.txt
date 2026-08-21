@@ -59,7 +59,10 @@ add_library(dcrecomp_core STATIC
 target_include_directories(dcrecomp_core PUBLIC ${DCRECOMP_INCLUDE_DIR})
 
 if(MSVC)
-    target_compile_options(dcrecomp_core PRIVATE /O2)
+    target_compile_options(dcrecomp_core PRIVATE /O2 /Zi)
+    # dbghelp resolves frame addresses to recompiled function names
+    target_link_libraries(dcrecomp_core PUBLIC dbghelp)
+    target_link_options(dcrecomp_core PUBLIC /DEBUG)
 endif()
 
 # Link SDL2/OpenGL

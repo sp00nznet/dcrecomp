@@ -213,6 +213,7 @@ class SH4Recompiler:
                 v |= 0x80000000
             if self.base <= v < self.base + self.size and (v & 1) == 0:
                 candidates.add(v)
+        candidates |= self._external_branch_targets()
         candidates -= set(self.functions)
 
         starts = sorted(self.functions)
@@ -236,6 +237,36 @@ class SH4Recompiler:
         print(f"Found {len(self.mid_entry_addrs)} mid-function entry points "
               f"in {len(self.mid_entries)} functions "
               f"({len(candidates)} candidates scanned)")
+
+    def _external_branch_targets(self):
+        """Branch targets that leave the function they were emitted in.
+
+        recompile_function turns a branch it cannot resolve locally into
+        `func_<target>(cpu); return;`. If <target> is a label inside some other
+        function rather than a function start, no such function exists and
+        generate_stubs.py fills it with a silent no-op - so the branch returns
+        without running the epilogue it was heading for, and every callee-saved
+        register the function had pushed stays clobbered. That was 5642 stubs
+        quietly corrupting registers.
+
+        Treating these as mid-function entries makes the branch land where it
+        was supposed to.
+        """
+        targets = set()
+        for addr, info in self.functions.items():
+            offset = self.addr_to_offset(addr)
+            end = self.addr_to_offset(info['end'])
+            if offset < 0 or end > self.size:
+                continue
+            while offset < end - 1:
+                pc = self.offset_to_addr(offset)
+                opcode = self.read_u16(offset)
+                _, is_branch, target, has_delay = self.recompile_instruction(opcode, pc)
+                if is_branch and isinstance(target, int):
+                    if not (addr <= target < info['end']):
+                        targets.add(target)
+                offset += 4 if has_delay else 2
+        return targets
 
     def _emittable_addrs(self, start_addr, end_addr):
         """Addresses inside [start,end) that begin an emitted instruction.
@@ -1160,7 +1191,29 @@ class SH4Recompiler:
             f.write("            fn = find_function((phys + 0xC100) | 0x80000000);\n")
             f.write("        }\n")
             f.write("    }\n")
+            f.write("#ifdef DCRECOMP_ABI_CHECK\n")
+            f.write("    /* SH-4 keeps r8-r14 callee-saved. A recompiled function\n")
+            f.write("     * that returns with one changed is a recompiler bug - usually\n")
+            f.write("     * a branch target with no entry point, stubbed out so the\n")
+            f.write("     * epilogue that would have popped them never runs. */\n")
+            f.write("    if (fn) {\n")
+            f.write("        uint32_t saved[7];\n")
+            f.write("        for (int i = 8; i <= 14; i++) saved[i - 8] = cpu->r[i];\n")
+            f.write("        uint32_t target = cpu->pc, from = cpu->pr;\n")
+            f.write("        fn(cpu);\n")
+            f.write("        static int abi_log = 0;\n")
+            f.write("        for (int i = 8; i <= 14 && abi_log < 50; i++) {\n")
+            f.write("            if (cpu->r[i] != saved[i - 8]) {\n")
+            f.write("                abi_log++;\n")
+            f.write("                printf(\"[ABI] func_%08X (from 0x%08X) clobbered r%d: %08X -> %08X\\n\",\n")
+            f.write("                       target | 0x80000000u, from, i, saved[i - 8], cpu->r[i]);\n")
+            f.write("                break;\n")
+            f.write("            }\n")
+            f.write("        }\n")
+            f.write("    }\n")
+            f.write("#else\n")
             f.write("    if (fn) { fn(cpu); }\n")
+            f.write("#endif\n")
             f.write("    else {\n")
             f.write("        /* BIOS/Boot ROM calls and null pointers are a no-op, but still\n")
             f.write("         * log them: a silently skipped callback is the classic cause of\n")

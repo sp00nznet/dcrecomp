@@ -14,6 +14,43 @@
 #include <string.h>
 #include <stdio.h>
 
+/* Native backtrace of the recompiled call chain.
+ *
+ * Recompiled functions are ordinary C functions, so the C stack IS the SH-4
+ * call chain. cpu->pr and cpu->pc only move on indirect branches, which makes
+ * them useless for locating a stall reached through direct calls - this is not.
+ * Needs debug info; without a PDB the frames print as bare addresses. */
+#ifdef _WIN32
+#include <windows.h>
+#include <dbghelp.h>
+void sh4_dump_native_stack(const char *tag) {
+    void *frames[40];
+    USHORT n = CaptureStackBackTrace(0, 40, frames, NULL);
+    HANDLE proc = GetCurrentProcess();
+    static int inited = 0;
+    if (!inited) {
+        SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME);
+        SymInitialize(proc, NULL, TRUE);
+        inited = 1;
+    }
+    char buf[sizeof(SYMBOL_INFO) + 256];
+    SYMBOL_INFO *sym = (SYMBOL_INFO *)buf;
+    sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+    sym->MaxNameLen = 255;
+    printf("[STACK %s]", tag);
+    for (USHORT i = 0; i < n; i++) {
+        DWORD64 disp = 0;
+        if (SymFromAddr(proc, (DWORD64)(uintptr_t)frames[i], &disp, sym))
+            printf(" %s", sym->Name);
+        else
+            printf(" 0x%p", frames[i]);
+    }
+    printf("\n");
+}
+#else
+void sh4_dump_native_stack(const char *tag) { (void)tag; }
+#endif
+
 /* External hardware reference (set during init) */
 static DCHardware *g_hardware = NULL;
 static SH4CPU *g_cpu_ref = NULL;
@@ -47,6 +84,7 @@ static bool g_in_irq = false;
 static uint64_t g_irq_delivered = 0;
 static uint64_t g_irq_reentrant = 0;   /* skipped because a handler was running */
 static uint64_t g_irq_masked = 0;      /* skipped because SR.BL or SR.IMASK blocked it */
+
 
 void sh4_set_irq_handler(void (*handler)(SH4CPU *cpu)) {
     g_irq_handler = handler;
@@ -409,11 +447,13 @@ uint32_t sh4_read32(SH4CPU *cpu, uint32_t addr) {
     g_read_seq++;
     /* ponytail: cheap counter gate first - polling the clock on every read
      * costs more than the interrupt it is looking for. 64K reads is ~300
-     * checks/sec, far denser than the 60Hz boundary we need to catch. */
-    if ((g_read_seq & 0xFFFF) == 0) sh4_poll_irq(cpu);
+     * checks/sec, comfortably denser than the 60Hz boundary we must catch.
+     * Too coarse and VBlank rate ends up tied to how memory-hungry the game
+     * happens to be rather than to the clock. */
+    if ((g_read_seq & 0x1FFF) == 0) sh4_poll_irq(cpu);
     if ((g_read_seq & 0x3FFFFF) == 0) {
-        printf("[HEARTBEAT] read32 #%uM addr=0x%08X pr=0x%08X sr=0x%08X irq=%llu reent=%llu masked=%llu\n",
-               g_read_seq >> 20, addr, cpu->pr, cpu->sr,
+        printf("[HEARTBEAT] read32 #%uM addr=0x%08X pc=0x%08X pr=0x%08X sr=0x%08X irq=%llu reent=%llu masked=%llu\n",
+               g_read_seq >> 20, addr, cpu->pc, cpu->pr, cpu->sr,
                (unsigned long long)g_irq_delivered,
                (unsigned long long)g_irq_reentrant,
                (unsigned long long)g_irq_masked);

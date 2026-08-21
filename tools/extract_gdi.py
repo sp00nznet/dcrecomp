@@ -15,13 +15,83 @@ GD_ROM_HD_START = 45000  # Standard GD-ROM high-density area start LBA
 ISO_PVD_SECTOR = 16
 
 def read_sector(f, sector_num):
-    """Read user data from a raw MODE1/2352 sector."""
+    """Read user data from a sector.
+
+    `f` is a Disc, addressed by absolute LBA. Kept as a free function so the
+    rest of the file reads unchanged.
+    """
+    if isinstance(f, Disc):
+        return f.read_sector(sector_num)
     f.seek(sector_num * SECTOR_SIZE_RAW + SECTOR_DATA_OFFSET)
     return f.read(SECTOR_DATA_SIZE)
 
+
+class Disc:
+    """Absolute-LBA view over the per-track .bin files chdman extractcd emits.
+
+    Tracks are laid out in two areas: the single-density tracks start at LBA 0,
+    the high-density area starts at LBA 45000. Every track consumes LBA space,
+    audio included, so a file's absolute LBA has to be resolved against the
+    whole layout rather than against one track.
+    """
+
+    def __init__(self, path):
+        self.tracks = []            # (start_lba, sectors, file handle or None)
+        if path.lower().endswith('.cue'):
+            self._load_cue(path)
+        else:
+            # A bare track file: assume it is the high-density data track.
+            f = open(path, 'rb')
+            n = os.path.getsize(path) // SECTOR_SIZE_RAW
+            self.tracks.append([GD_ROM_HD_START, n, f])
+
+    def _load_cue(self, cue_path):
+        base = os.path.dirname(os.path.abspath(cue_path))
+        entries, high = [], False
+        pending_file, pregap = None, 0
+        for line in open(cue_path, 'r', errors='replace'):
+            t = line.strip()
+            up = t.upper()
+            if up.startswith('REM') and 'HIGH-DENSITY' in up:
+                high = True
+            elif up.startswith('FILE'):
+                pending_file = t.split('"')[1]
+            elif up.startswith('TRACK'):
+                entries.append({'file': pending_file, 'high': high,
+                                'audio': 'AUDIO' in up, 'pregap': 0})
+            elif up.startswith('PREGAP') and entries:
+                mm, ss, ff = (int(x) for x in t.split()[1].split(':'))
+                entries[-1]['pregap'] = (mm * 60 + ss) * 75 + ff
+
+        lba = 0
+        for e in entries:
+            if e['high'] and lba < GD_ROM_HD_START:
+                lba = GD_ROM_HD_START
+            lba += e['pregap']
+            full = os.path.join(base, e['file'])
+            n = os.path.getsize(full) // SECTOR_SIZE_RAW
+            f = None if e['audio'] else open(full, 'rb')
+            self.tracks.append([lba, n, f])
+            lba += n
+
+    def read_sector(self, abs_lba):
+        for start, n, f in self.tracks:
+            if f is not None and start <= abs_lba < start + n:
+                f.seek((abs_lba - start) * SECTOR_SIZE_RAW + SECTOR_DATA_OFFSET)
+                return f.read(SECTOR_DATA_SIZE)
+        return b''
+
+    def describe(self):
+        out = []
+        for i, (start, n, f) in enumerate(self.tracks, 1):
+            kind = 'data' if f else 'audio'
+            out.append(f"  track {i:2d}: LBA {start:>7,}..{start + n - 1:>7,}  {kind}")
+        return chr(10).join(out)
+
+
 def parse_ip_bin(f):
     """Parse the Dreamcast IP.BIN header."""
-    data = read_sector(f, 0)
+    data = read_sector(f, GD_ROM_HD_START)
     return {
         'hardware_id':   data[0x00:0x10].decode('ascii', errors='replace').strip(),
         'maker_id':      data[0x10:0x20].decode('ascii', errors='replace').strip(),
@@ -36,8 +106,8 @@ def parse_ip_bin(f):
     }
 
 def abs_to_rel(abs_lba):
-    """Convert absolute disc LBA to track-relative sector."""
-    return abs_lba - GD_ROM_HD_START
+    """Identity: Disc.read_sector takes absolute LBAs and finds the track."""
+    return abs_lba
 
 def parse_directory_record(data, offset):
     """Parse a single ISO9660 directory record."""
@@ -98,18 +168,21 @@ def extract_file(f, abs_lba, size, output_path):
     """Extract a file from the disc image."""
     os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
 
-    rel_lba = abs_to_rel(abs_lba)
+    written = 0
     with open(output_path, 'wb') as out:
         remaining = size
-        sector = rel_lba
+        sector = abs_to_rel(abs_lba)
         while remaining > 0:
             data = read_sector(f, sector)
-            write_size = min(remaining, SECTOR_DATA_SIZE)
+            if not data:
+                break          # ran off the end of the mapped tracks
+            write_size = min(remaining, SECTOR_DATA_SIZE, len(data))
             out.write(data[:write_size])
+            written += write_size
             remaining -= write_size
             sector += 1
 
-    return size
+    return written
 
 def extract_directory(f, abs_lba, size, output_dir, prefix=""):
     """Recursively extract all files from a directory."""
@@ -136,15 +209,18 @@ def extract_directory(f, abs_lba, size, output_dir, prefix=""):
     return total_bytes
 
 def main():
-    track3_path = sys.argv[1] if len(sys.argv) > 1 else "Crazy Taxi (USA) (Track 3).bin"
+    disc_path = sys.argv[1] if len(sys.argv) > 1 else "disc.cue"
     output_dir = sys.argv[2] if len(sys.argv) > 2 else "disc_extract"
     os.makedirs(output_dir, exist_ok=True)
 
-    file_size = os.path.getsize(track3_path)
-    total_sectors = file_size // SECTOR_SIZE_RAW
-    print(f"Track 3: {file_size:,} bytes ({total_sectors} sectors)")
+    # Prefer the cue: a disc with CD audio spreads its high-density area over
+    # several tracks and the payload is usually not in track 3.
+    disc = Disc(disc_path)
+    print("=== Disc layout ===")
+    print(disc.describe())
 
-    with open(track3_path, 'rb') as f:
+    if True:
+        f = disc
         # Parse IP.BIN
         print("\n=== Dreamcast IP.BIN Header ===")
         ip_info = parse_ip_bin(f)
@@ -157,7 +233,7 @@ def main():
                 info_f.write(f"{key}: {value}\n")
 
         # Read PVD
-        pvd = read_sector(f, ISO_PVD_SECTOR)
+        pvd = read_sector(f, GD_ROM_HD_START + ISO_PVD_SECTOR)
         if pvd[1:6] != b'CD001':
             print("ERROR: No valid ISO9660 PVD found!")
             sys.exit(1)
@@ -168,7 +244,7 @@ def main():
 
         print(f"\n=== ISO9660 Filesystem ===")
         print(f"  Volume: {volume_id}")
-        print(f"  Root directory: LBA {root_lba} (track sector {abs_to_rel(root_lba)})")
+        print(f"  Root directory: LBA {root_lba}")
 
         # Extract everything
         print(f"\n=== Extracting files to {output_dir}/ ===")

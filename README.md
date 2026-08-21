@@ -19,17 +19,8 @@ dcrecomp/
 │   ├── hal/
 │   │   ├── dc_hardware.h       # Hardware registers (lightweight/legacy HAL)
 │   │   ├── pvr2.h              # PowerVR2 TA + renderer API (lightweight)
-│   │   ├── naomi_io.h          # Naomi JVS I/O (lightweight)
-│   │   └── flycast_adapter.h   # C API bridging to Flycast C++ subsystems
+│   │   └── naomi_io.h          # Naomi JVS I/O (lightweight)
 │   └── platform/platform.h     # SDL2/Win32 platform abstraction
-├── flycast/                     # Extracted Flycast hardware emulation (GPLv2)
-│   ├── pvr/                    # PowerVR2 GPU (TA, textures, OpenGL/Vulkan/DX)
-│   ├── aica/                   # AICA sound (64-ch, ADPCM, ARM7 DSP)
-│   ├── maple/                  # Maple bus + full JVS protocol
-│   ├── naomi/                  # ROM boards, card readers, hoppers, EEPROMs
-│   ├── holly/                  # System bus, interrupt controller, DMA
-│   ├── mem/                    # Address space routing + handler registration
-│   └── README.md               # Integration architecture docs
 ├── src/
 │   ├── recompiler/sh4_cpu.c    # CPU state, memory access, address translation
 │   ├── hal/
@@ -93,10 +84,10 @@ Compile with CMake → Native executable
 | Maple Bus (DC controllers) | Full |
 | Naomi JVS I/O | Basic (buttons, coins, card reader) |
 | Naomi M4 decryption | Full |
-| Flycast PVR2 (textures, fog, all vertex types) | Extracted, adapter in progress |
-| Flycast AICA (full sound) | Extracted, not yet wired |
-| Flycast JVS (complete arcade I/O) | Extracted, not yet wired |
-| Flycast Naomi (card readers, hoppers, ROMs) | Extracted, not yet wired |
+| Accurate PVR2 (textures, fog, all vertex types) | Not implemented |
+| Full AICA sound | Not implemented |
+| Complete JVS arcade I/O | Not implemented |
+| Naomi card readers, hoppers, ROMs | Not implemented |
 
 ## Usage
 
@@ -145,17 +136,17 @@ dcrecomp supports two hardware emulation backends:
 The original homespun hardware abstraction (`src/hal/`). Simple register stubs
 suitable for initial bring-up and headless testing. Limited accuracy.
 
-### Flycast Backend (recommended)
-Battle-tested hardware emulation extracted from [Flycast](https://github.com/flyinghead/flycast)
-(`flycast/`). Provides accurate PVR2 rendering (with textures, fog, modifier volumes),
-full AICA sound, complete JVS arcade I/O protocol, Naomi card readers, and more.
+### Accurate hardware backend (planned)
 
-The Flycast backend follows the same pattern used by other recomp projects
-(e.g., Xenia → Xenon recomp): take a mature emulator, strip the CPU
-interpreter/JIT, and link the hardware subsystems as libraries against
-statically recompiled game code.
+The intended path is the one other recomp projects take (e.g. Xenia -> Xenon
+recomp): take a mature emulator, strip its CPU interpreter/JIT, and link its
+hardware subsystems against statically recompiled game code.
 
-See `flycast/README.md` and `docs/flycast-extraction.md` for details.
+For Dreamcast/Naomi that emulator is [Flycast](https://github.com/flyinghead/flycast),
+which is **GPLv2**. dcrecomp itself is MIT and ships no Flycast code. Anything
+built by linking Flycast subsystems is a GPLv2 derivative and must be
+distributed as such - so that backend belongs in a separate, explicitly GPLv2
+repository, not here. See `docs/flycast-extraction.md` for the extraction notes.
 
 ## Current Projects
 
@@ -179,5 +170,11 @@ See Mushiking (kingofbeetle) as a reference implementation.
 
 ## License
 
-- dcrecomp core: Private repository
-- Flycast subsystems (`flycast/`): GPLv2 (see flycast/README.md)
+MIT - see [LICENSE](LICENSE).
+
+Applies to the framework: the recompiler tools, CPU/HAL/platform sources, and
+headers in this repository. It does **not** grant any rights to game code
+produced by running these tools on a commercial ROM or disc image - that output
+remains the copyright of the original publisher.
+
+This repository intentionally contains no GPL-licensed emulator code.

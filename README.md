@@ -168,6 +168,26 @@ To recomp a new game:
 
 See Mushiking (kingofbeetle) as a reference implementation.
 
+## Credits & prior art
+
+dcrecomp is the only Dreamcast/Naomi static recompiler we're aware of, but it
+stands on work others did first. If you use any of it, credit them too.
+
+- **[Flycast](https://github.com/flyinghead/flycast)** (flyinghead, GPLv2) - the
+  reference for how Dreamcast hardware actually behaves. dcrecomp ships no
+  Flycast code, but the PVR2/Holly/AICA register semantics implemented here were
+  learned by reading it.
+- **[N64Recomp](https://github.com/N64Recomp/N64Recomp)** (Wiseguy) - established
+  the static-recompilation-as-preservation approach this project copies.
+- **[tbg-decomp](https://github.com/lhsazevedo/tokyo-bus-guide-decomp)**
+  (lhsazevedo) - matching decompilation of Tokyo Bus Guide, plus an SH-4 object
+  simulator and test harness. The best existing prior art for validating SH-4
+  translation.
+- **[decompsh](https://github.com/chromadevlabs/decompsh)** (chromadevlabs) -
+  SH-4 disassembler proof of concept.
+- **[KallistiOS](https://github.com/KallistiOS/KallistiOS)** and
+  **[dreamcast.wiki](https://www.dreamcast.wiki/)** - hardware documentation.
+
 ## License
 
 MIT - see [LICENSE](LICENSE).

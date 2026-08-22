@@ -98,7 +98,14 @@ static int vblank_irl_level(void) {
     if (dc_hw_read32(g_hardware, SB_IML6NRM) & VBL_IN) return 6;
     if (dc_hw_read32(g_hardware, SB_IML4NRM) & VBL_IN) return 4;
     if (dc_hw_read32(g_hardware, SB_IML2NRM) & VBL_IN) return 2;
-    return 0;
+
+    /* Nothing routed. On hardware the BIOS programs these before handing
+     * control to the game, and we bypass the BIOS - Crazy Taxi happens to set
+     * them itself, Mushiking never touches them. Treating unrouted as "never
+     * deliver" would mean such a game gets no interrupts at all, so assume the
+     * mid IRL. The SR.BL and SR.IMASK checks below still do the real work of
+     * keeping us out of critical sections. */
+    return 4;
 }
 
 void sh4_poll_irq(SH4CPU *cpu) {

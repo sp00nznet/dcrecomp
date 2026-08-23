@@ -1149,6 +1149,16 @@ class SH4Recompiler:
                 # rts and falls through into the next state on the caller's
                 # frame, which is how a scene that should run once loops.
                 slot_is_entry = not self._takes_delay_slot(offset, has_delay)
+                if slot_is_entry and not (target == "rts" or "jmp" in code
+                                          or "braf" in code or "rte" in code
+                                          or ("bra" in code and "bsr" not in code)):
+                    # Control comes back here - bsr, bt/s, bf/s. An inline copy
+                    # plus the labelled one would run the slot twice, which is
+                    # worse than the branch this would have fixed. Leave those
+                    # alone until they are worth a jump around the label.
+                    lines.append(f"    {code}")
+                    offset += 2
+                    continue
 
                 # Emit label at delay-slot position if needed
                 if delay_pc in local_labels and not slot_is_entry:

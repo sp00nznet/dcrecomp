@@ -13,8 +13,21 @@
 #include <stdio.h>
 #include <string.h>
 
-static const uint8_t *g_flash = NULL;
-static uint32_t g_flash_size = 0;
+/* 128KB, the size of a Dreamcast's flash. Erased flash reads as 0xFF; starting
+ * from zeros makes a game think there is a corrupt block rather than a blank
+ * one. Writes land here so a game can read back what it just wrote - a settings
+ * partition gets formatted and re-read during boot, and dropping the write
+ * turns that into an endless reformat loop. */
+#define FLASH_SIZE 0x20000
+static uint8_t g_flash_store[FLASH_SIZE];
+static int g_flash_ready = 0;
+
+static void flash_init(void) {
+    if (g_flash_ready)
+        return;
+    memset(g_flash_store, 0xFF, sizeof g_flash_store);
+    g_flash_ready = 1;
+}
 
 /* Flashrom partition layout, as the BIOS reports it. Offsets and sizes are
  * fixed across retail units. */
@@ -29,8 +42,9 @@ static const struct { uint32_t offset, size; } FLASH_PARTS[] = {
 #define FLASH_PART_COUNT ((int)(sizeof FLASH_PARTS / sizeof FLASH_PARTS[0]))
 
 void sh4_bios_set_flashrom(const void *data, uint32_t size) {
-    g_flash = (const uint8_t *)data;
-    g_flash_size = size;
+    flash_init();
+    if (data && size)
+        memcpy(g_flash_store, data, size < FLASH_SIZE ? size : FLASH_SIZE);
 }
 
 void sh4_bios_install_vectors(SH4CPU *cpu) {
@@ -54,17 +68,36 @@ static int syscall_flashrom(SH4CPU *cpu) {
         return 0;
     }
     case 1: {   /* read(offset, dest, count) -> bytes read, or -1 */
+        flash_init();
         uint32_t off = cpu->r[4], dest = cpu->r[5], count = cpu->r[6];
         for (uint32_t i = 0; i < count; i++) {
-            uint8_t b = (g_flash && off + i < g_flash_size) ? g_flash[off + i] : 0;
+            uint8_t b = (off + i < FLASH_SIZE) ? g_flash_store[off + i] : 0xFF;
             sh4_write8(cpu, dest + i, b);
         }
         return (int)count;
     }
-    case 2:     /* write(offset, src, count) - accept and drop */
-        return (int)cpu->r[6];
-    case 3:     /* delete(offset) */
+    case 2: {   /* write(offset, src, count) -> bytes written */
+        flash_init();
+        uint32_t off = cpu->r[4], src = cpu->r[5], count = cpu->r[6];
+        for (uint32_t i = 0; i < count; i++) {
+            if (off + i < FLASH_SIZE)
+                g_flash_store[off + i] = sh4_read8(cpu, src + i);
+        }
+        return (int)count;
+    }
+    case 3: {   /* delete(offset): erase the partition containing it */
+        flash_init();
+        uint32_t off = cpu->r[4];
+        for (int i = 0; i < FLASH_PART_COUNT; i++) {
+            if (off >= FLASH_PARTS[i].offset &&
+                off < FLASH_PARTS[i].offset + FLASH_PARTS[i].size) {
+                memset(g_flash_store + FLASH_PARTS[i].offset, 0xFF,
+                       FLASH_PARTS[i].size);
+                break;
+            }
+        }
         return 0;
+    }
     default:
         printf("[BIOS] flashrom: unknown selector %u\n", sel);
         return -1;

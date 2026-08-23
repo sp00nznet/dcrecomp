@@ -72,7 +72,7 @@ static void watch_check(uint32_t addr, uint32_t val) {
     if (hit) {
         static unsigned long n = 0;
         n++;
-        if (n <= 8 || (n % 5000) == 0) {
+        if (n <= 60 || (n % 5000) == 0) {
             printf("[WATCH] write 0x%08X = 0x%08X\n", addr, val);
             sh4_dump_native_stack("watch");
         }

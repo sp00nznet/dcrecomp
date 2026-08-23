@@ -246,6 +246,20 @@ int pvr2_present_framebuffer(uint32_t fb_addr, uint32_t fb_ctrl, int width, int 
         }
     }
 
+    /* If the scanout window is blank, say whether VRAM holds anything at all
+     * and where - during bring-up "nothing on screen" and "nothing anywhere"
+     * are very different problems. */
+    if (g_fb_logged < 3 && nonzero == 0) {
+        size_t used = 0, first = (size_t)-1;
+        for (size_t i = 0; i < DC_VRAM_SIZE; i += 4) {
+            if (*(const uint32_t *)(vram + i)) {
+                used++;
+                if (first == (size_t)-1) first = i;
+            }
+        }
+        printf("[PVR2] VRAM: %zu non-zero words, first at 0x%06zX\n", used, first == (size_t)-1 ? (size_t)0 : first);
+    }
+
     if (g_fb_logged < 3) {
         g_fb_logged++;
         printf("[PVR2] present: addr 0x%06X fmt %d %dx%d, %d non-black pixels\n",

@@ -75,6 +75,12 @@ void pvr2_render_destroy(void);
 /* Render all submitted geometry to the current framebuffer */
 void pvr2_render_frame(void);
 
+/* Draw the PVR2 scanout framebuffer as a fullscreen quad. `fb_addr` is FB_R_SOF1
+ * and `fb_ctrl` is FB_R_CTRL, whose low bits select the pixel format. Returns
+ * the number of non-black pixels, which is a useful "is anything there yet"
+ * signal during bring-up. */
+int pvr2_present_framebuffer(uint32_t fb_addr, uint32_t fb_ctrl, int width, int height);
+
 /* Resize viewport */
 void pvr2_render_resize(int width, int height);
 

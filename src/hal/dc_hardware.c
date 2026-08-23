@@ -487,6 +487,16 @@ void dc_pvr_end_list(DCHardware *hw) {
 
 void dc_pvr_wait_vblank(DCHardware *hw) {
     hw->vblank_count++;
+
+    /* Scan out whatever is in the framebuffer. A game fills VRAM either through
+     * the tile accelerator or by writing it directly, and until it reaches its
+     * render loop only the latter has happened - so presenting here is what
+     * makes early frames visible at all. */
+    pvr2_present_framebuffer(hw->pvr_fb_addr1,
+                             hw->hw_regs[hw_reg_idx(PVR_FB_R_CTRL)],
+                             DC_SCREEN_W, DC_SCREEN_H);
+    platform_swap_buffers();
+    platform_poll_events(hw);
     /* Set VBLANK interrupt */
     hw->sb_istnrm |= (1 << 3); /* VBlank-IN */
 }

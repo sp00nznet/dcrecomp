@@ -6,6 +6,8 @@
  */
 
 #include "hal/pvr2.h"
+#include "recompiler/sh4_cpu.h"
+#include <stdlib.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -142,6 +144,127 @@ void pvr2_render_destroy(void) {
     if (g_shader) { glDeleteProgram(g_shader); g_shader = 0; }
 }
 
+
+/* ---- Framebuffer presentation ------------------------------------------ */
+
+static GLuint g_fb_tex = 0;
+static GLuint g_fb_shader = 0;
+static GLuint g_fb_vao = 0, g_fb_vbo = 0;
+static unsigned char *g_fb_pixels = NULL;
+static int g_fb_logged = 0;
+
+static const char *fb_vert_src =
+    "#version 330 core\n"
+    "layout(location=0) in vec2 pos;\n"
+    "out vec2 uv;\n"
+    "void main(){ uv = vec2((pos.x+1.0)*0.5, 1.0-(pos.y+1.0)*0.5);\n"
+    "             gl_Position = vec4(pos,0.0,1.0); }\n";
+
+static const char *fb_frag_src =
+    "#version 330 core\n"
+    "in vec2 uv; out vec4 frag; uniform sampler2D fb;\n"
+    "void main(){ frag = texture(fb, uv); }\n";
+
+static void fb_init(void) {
+    if (g_fb_tex)
+        return;
+    GLuint vs = compile_shader(GL_VERTEX_SHADER, fb_vert_src);
+    GLuint fs = compile_shader(GL_FRAGMENT_SHADER, fb_frag_src);
+    g_fb_shader = glCreateProgram();
+    glAttachShader(g_fb_shader, vs);
+    glAttachShader(g_fb_shader, fs);
+    glLinkProgram(g_fb_shader);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+
+    static const float quad[] = { -1,-1,  1,-1,  -1, 1,   1,-1,  1, 1,  -1, 1 };
+    glGenVertexArrays(1, &g_fb_vao);
+    glGenBuffers(1, &g_fb_vbo);
+    glBindVertexArray(g_fb_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, g_fb_vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof quad, quad, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void *)0);
+
+    glGenTextures(1, &g_fb_tex);
+    glBindTexture(GL_TEXTURE_2D, g_fb_tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+}
+
+int pvr2_present_framebuffer(uint32_t fb_addr, uint32_t fb_ctrl, int width, int height) {
+    const uint8_t *vram = sh4_get_vram_ptr();
+    if (!vram || width <= 0 || height <= 0)
+        return 0;
+
+    fb_init();
+    if (!g_fb_pixels)
+        g_fb_pixels = (unsigned char *)malloc(1024 * 1024 * 4);
+    if (!g_fb_pixels)
+        return 0;
+
+    /* FB_R_CTRL bits 2:0 select the scanout format. */
+    int fmt = (int)(fb_ctrl & 0x7);
+    uint32_t base = fb_addr & 0x00FFFFFF;
+    if (base >= DC_VRAM_SIZE)
+        base = 0;
+
+    int nonzero = 0;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            uint32_t r = 0, g = 0, b = 0;
+            if (fmt == 0 || fmt == 1) {                 /* RGB555 / RGB565 */
+                uint32_t off = base + (uint32_t)(y * width + x) * 2;
+                if (off + 1 >= DC_VRAM_SIZE) continue;
+                uint16_t p = (uint16_t)(vram[off] | (vram[off + 1] << 8));
+                if (fmt == 0) {
+                    r = ((p >> 10) & 0x1F) << 3;
+                    g = ((p >> 5) & 0x1F) << 3;
+                    b = (p & 0x1F) << 3;
+                } else {
+                    r = ((p >> 11) & 0x1F) << 3;
+                    g = ((p >> 5) & 0x3F) << 2;
+                    b = (p & 0x1F) << 3;
+                }
+                if (p) nonzero++;
+            } else if (fmt == 2) {                      /* RGB888, 3 bytes */
+                uint32_t off = base + (uint32_t)(y * width + x) * 3;
+                if (off + 2 >= DC_VRAM_SIZE) continue;
+                b = vram[off]; g = vram[off + 1]; r = vram[off + 2];
+                if (r | g | b) nonzero++;
+            } else {                                    /* 0888 / 8888 */
+                uint32_t off = base + (uint32_t)(y * width + x) * 4;
+                if (off + 3 >= DC_VRAM_SIZE) continue;
+                b = vram[off]; g = vram[off + 1]; r = vram[off + 2];
+                if (r | g | b) nonzero++;
+            }
+            unsigned char *px = g_fb_pixels + ((size_t)y * width + x) * 4;
+            px[0] = (unsigned char)r; px[1] = (unsigned char)g;
+            px[2] = (unsigned char)b; px[3] = 255;
+        }
+    }
+
+    if (g_fb_logged < 3) {
+        g_fb_logged++;
+        printf("[PVR2] present: addr 0x%06X fmt %d %dx%d, %d non-black pixels\n",
+               base, fmt, width, height, nonzero);
+    }
+
+    glBindTexture(GL_TEXTURE_2D, g_fb_tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, g_fb_pixels);
+
+    glDisable(GL_DEPTH_TEST);
+    glUseProgram(g_fb_shader);
+    glBindVertexArray(g_fb_vao);
+    glBindTexture(GL_TEXTURE_2D, g_fb_tex);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+
+    return nonzero;
+}
+
 void pvr2_render_frame(void) {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -202,6 +325,9 @@ int pvr2_render_init(int w, int h) {
 }
 void pvr2_render_destroy(void) {}
 void pvr2_render_frame(void) {}
+int pvr2_present_framebuffer(uint32_t a, uint32_t c, int w, int h) {
+    (void)a; (void)c; (void)w; (void)h; return 0;
+}
 void pvr2_render_resize(int w, int h) { (void)w; (void)h; }
 
 #endif /* HAS_OPENGL */

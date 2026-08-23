@@ -24,6 +24,12 @@
 #define PVR_PARAM_BASE  0x005F8020
 #define PVR_REGION_BASE 0x005F802C
 #define PVR_SPAN_SORT   0x005F8030
+/* Scanout size we present at. The DC can do other modes; these cover
+ * everything these games use. */
+#define DC_SCREEN_W 640
+#define DC_SCREEN_H 480
+
+#define PVR_FB_R_CTRL   0x005F8044  /* scanout enable + pixel format */
 #define PVR_FB_ADDR1    0x005F8050
 #define PVR_FB_ADDR2    0x005F8054
 #define PVR_FB_SIZE     0x005F805C

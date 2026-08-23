@@ -200,16 +200,25 @@ static int gdc_exec(SH4CPU *cpu, uint32_t cmd, uint32_t param) {
 static int syscall_gdrom(SH4CPU *cpu) {
     switch (cpu->r[7]) {
     case 0: {   /* ReqCmd(cmd, param) -> request id, 0 on refusal */
+        static int reqlog = 0;
+        if (reqlog < 20) {
+            reqlog++;
+            printf("[BIOS] gdrom ReqCmd cmd=%u param=0x%08X\n", cpu->r[4], cpu->r[5]);
+        }
         g_gdc_last_id = g_gdc_next_id++;
         gdc_exec(cpu, cpu->r[4], cpu->r[5]);
         return (int)g_gdc_last_id;
     }
-    case 1: {   /* GetCmdStat(id, stat[4]) -> 0 done, 1 busy */
+    case 1: {   /* GetCmdStat(id, stat[4]).
+                 * 0 NO_ACTIVE, 1 PROCESSING, 2 COMPLETED, 3 ABORTED. Callers
+                 * spin while PROCESSING and treat anything but COMPLETED as a
+                 * failure - returning 0 here made every command look like it
+                 * had never been queued, so the game retried CMD_INIT forever. */
         if (cpu->r[5]) {
             for (int i = 0; i < 4; i++)
                 sh4_write32(cpu, cpu->r[5] + i * 4, 0);
         }
-        return 0;
+        return 2;   /* COMPLETED */
     }
     case 2:     /* ExecServer - nothing to advance, we finish synchronously */
         return 0;
@@ -218,8 +227,8 @@ static int syscall_gdrom(SH4CPU *cpu) {
         return 0;
     case 4:     /* GetDrvStat(stat[2]): standby, and a GD-ROM in the drive */
         if (cpu->r[4]) {
-            sh4_write32(cpu, cpu->r[4], 2);        /* paused/standby */
-            sh4_write32(cpu, cpu->r[4] + 4, 0x80); /* GD-ROM */
+            sh4_write32(cpu, cpu->r[4], 2);     /* standby: disc in, idle */
+            sh4_write32(cpu, cpu->r[4] + 4, 8); /* disc type: GD-ROM */
         }
         return 0;
     default:

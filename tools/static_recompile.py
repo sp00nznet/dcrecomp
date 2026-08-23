@@ -1135,13 +1135,23 @@ class SH4Recompiler:
                 continue
 
             # Handle delay slots for branch instructions
-            if self._takes_delay_slot(offset, has_delay) and offset + 2 < func_end:
+            if has_delay and offset + 2 < func_end:
                 delay_opcode = self.read_u16(offset + 2)
                 delay_pc = self.offset_to_addr(offset + 2)
                 delay_code, _, _, _ = self.recompile_instruction(delay_opcode, delay_pc)
 
+                # The slot can also be somewhere the program jumps to directly.
+                # It is still this branch's delay slot - it just cannot be
+                # *consumed* here, or the entry point loses its label and the
+                # code it starts is never emitted. Inline a copy of the slot to
+                # finish the branch, then let the walk re-emit it under its
+                # label. Skipping the branch instead drops the `return` off an
+                # rts and falls through into the next state on the caller's
+                # frame, which is how a scene that should run once loops.
+                slot_is_entry = not self._takes_delay_slot(offset, has_delay)
+
                 # Emit label at delay-slot position if needed
-                if delay_pc in local_labels:
+                if delay_pc in local_labels and not slot_is_entry:
                     lines.append(f"L_{delay_pc:08X}:;")
                     emitted_labels.add(delay_pc)
 
@@ -1207,7 +1217,7 @@ class SH4Recompiler:
                     lines.append(f"    {code}")
                     lines.append(f"    {delay_code} /* delay slot */")
 
-                offset += 4  # Skip both the branch and delay slot
+                offset += 2 if slot_is_entry else 4
                 continue
 
             lines.append(f"    {code}")

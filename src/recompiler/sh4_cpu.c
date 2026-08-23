@@ -179,6 +179,14 @@ void sh4_poll_irq(SH4CPU *cpu) {
     memcpy(f.fr, cpu->fr, sizeof f.fr);
     memcpy(f.xf, cpu->xf, sizeof f.xf);
 
+    /* Where is the game actually spending its time? Set DCRECOMP_STACKEVERY=N
+     * and every Nth interrupt prints the recompiled call chain it interrupted.
+     * A game that has stopped making progress shows the same chain every time. */
+    { static int every = -1, n = 0;
+      if (every < 0) { const char *e = getenv("DCRECOMP_STACKEVERY");
+                       every = e ? atoi(e) : 0; }
+      if (every > 0 && (++n % every) == 0) sh4_dump_native_stack("irq"); }
+
     g_in_irq = true;
     g_irq_delivered++;
     g_irq_handler(cpu);
@@ -724,6 +732,17 @@ void sh4_write32(SH4CPU *cpu, uint32_t addr, uint32_t val) {
         return;
     }
     if (is_hw_register(phys) && g_hardware) {
+        /* Log the first write to each distinct register. "Which hardware has
+         * the game actually programmed" is otherwise invisible - and a game
+         * that shows nothing has usually not programmed the part you assume. */
+        static int hwlog = -1;
+        if (hwlog < 0) hwlog = getenv("DCRECOMP_HWREG") ? 1 : 0;
+        if (hwlog) { static uint32_t seen[512]; static int nseen = 0; int i;
+          for (i = 0; i < nseen; i++) if (seen[i] == phys) break;
+          if (i == nseen && nseen < 512) {
+              seen[nseen++] = phys;
+              printf("[HWREG] first write 0x%08X = 0x%08X\n", phys, val);
+          } }
         dc_hw_write32(g_hardware, phys, val);
     }
 }

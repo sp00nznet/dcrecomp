@@ -65,9 +65,9 @@ static void watch_check(uint32_t addr, uint32_t val) {
         g_watch_init = 1;
     }
     if (g_watch_addr && (addr & 0x1FFFFFFF) == (g_watch_addr & 0x1FFFFFFF)) {
-        static int n = 0;
-        if (n < 20) {
-            n++;
+        static unsigned long n = 0;
+        n++;
+        if (n <= 4 || (n % 5000) == 0) {
             printf("[WATCH] write 0x%08X = 0x%08X\n", addr, val);
             sh4_dump_native_stack("watch");
         }

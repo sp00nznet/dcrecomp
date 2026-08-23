@@ -153,6 +153,7 @@ void sh4_set_cpu_ref(SH4CPU *cpu);
 /* Get raw memory pointers (for DMA) */
 uint8_t *sh4_get_ram_ptr(void);
 uint8_t *sh4_get_vram_ptr(void);
+uint8_t *sh4_get_aica_ram_ptr(void);
 uint32_t sh4_get_ram_size(void);
 uint32_t sh4_get_ram_mask(void);
 

@@ -186,6 +186,118 @@ uint32_t dc_hw_read32(DCHardware *hw, uint32_t addr) {
     return 0;
 }
 
+
+/* ---- G2 and PVR DMA ------------------------------------------------------
+ *
+ * Four G2 channels (AICA, Ext1, Ext2, Dev) and the PVR channel share a layout:
+ * seven registers 4 bytes apart holding the device-side address, the root-bus
+ * (system RAM) address, the length, direction, trigger select, enable and
+ * start. Writing 1 to start runs the transfer; hardware clears it when done
+ * and raises a bit in SB_ISTNRM. A game polls the start register to wait, so
+ * the clear is the part that matters - a transfer we cannot place still has to
+ * finish.
+ *
+ * ponytail: transfers complete inside the write. Real DMA overlaps with the
+ * CPU, and a game that reads the destination before polling would see it early
+ * - none do, because on hardware the data is not there yet either. If timing
+ * ever matters, this is where a completion deadline would go.
+ */
+#define DMA_OFF_DEVICE 0x00   /* device-side address (AICA RAM, VRAM, TA) */
+#define DMA_OFF_ROOT   0x04   /* system RAM address */
+#define DMA_OFF_LEN    0x08
+#define DMA_OFF_DIR    0x0C   /* 0 = root -> device, 1 = device -> root */
+#define DMA_OFF_START  0x18
+
+/* Where a DMA address points, as a pointer into the memory we own. Returns
+ * NULL for anything unmapped, and clamps `len` to what actually fits. */
+static uint8_t *dma_resolve(uint32_t addr, uint32_t *len, const char **what) {
+    uint32_t phys = addr & 0x1FFFFFFF;
+
+    if (phys >= 0x00800000 && phys < 0x00A00000) {
+        uint8_t *aica = sh4_get_aica_ram_ptr();
+        uint32_t off = phys - 0x00800000;
+        if (!aica) return NULL;
+        if (off + *len > DC_AICA_SIZE) *len = DC_AICA_SIZE - off;
+        *what = "AICA";
+        return aica + off;
+    }
+    /* 0x04000000 is VRAM as the CPU sees it, 0x11000000 the TA texture path;
+     * both land in the same 8MB. */
+    uint32_t vram_off = 0xFFFFFFFF;
+    if (phys >= 0x04000000 && phys < 0x04800000)      vram_off = phys - 0x04000000;
+    else if (phys >= 0x05000000 && phys < 0x05800000) vram_off = phys - 0x05000000;
+    else if (phys >= 0x11000000 && phys < 0x11800000) vram_off = phys - 0x11000000;
+    if (vram_off != 0xFFFFFFFF) {
+        uint8_t *vram = sh4_get_vram_ptr();
+        if (!vram) return NULL;
+        if (vram_off + *len > DC_VRAM_SIZE) *len = DC_VRAM_SIZE - vram_off;
+        *what = "VRAM";
+        return vram + vram_off;
+    }
+    if (phys >= DC_RAM_BASE && phys < DC_RAM_BASE + 0x01000000) {
+        uint8_t *ram = sh4_get_ram_ptr();
+        if (!ram) return NULL;
+        *what = "RAM";
+        return ram + ((phys - DC_RAM_BASE) & sh4_get_ram_mask());
+    }
+    return NULL;
+}
+
+static void run_dma(DCHardware *hw, uint32_t base, int istnrm_bit,
+                    const char *name) {
+    uint32_t device = hw->hw_regs[hw_reg_idx(base + DMA_OFF_DEVICE)];
+    uint32_t root   = hw->hw_regs[hw_reg_idx(base + DMA_OFF_ROOT)];
+    uint32_t len    = hw->hw_regs[hw_reg_idx(base + DMA_OFF_LEN)] & 0x1FFFFFFF;
+    uint32_t dir    = hw->hw_regs[hw_reg_idx(base + DMA_OFF_DIR)] & 1;
+
+    static int dma_log = 0;
+    int log = dma_log < 24;
+
+    /* The TA FIFO is a register, not memory - feed it packet by packet. */
+    if (!dir && (device & 0x1FFFFFFF) >= 0x10000000
+             && (device & 0x1FFFFFFF) < 0x10800000) {
+        uint32_t srclen = len;
+        const char *sw = "?";
+        uint8_t *src = dma_resolve(root, &srclen, &sw);
+        int packets = 0;
+        if (src) {
+            for (uint32_t off = 0; off + 32 <= srclen; off += 32) {
+                pvr2_ta_write((const uint32_t *)(src + off));
+                packets++;
+            }
+        }
+        if (log) {
+            dma_log++;
+            printf("[%s-DMA] %d packets (%u bytes) to TA FIFO\n",
+                   name, packets, len);
+        }
+    } else {
+        uint32_t copy = len;
+        const char *dw = "?", *sw = "?";
+        uint8_t *devp = dma_resolve(device, &copy, &dw);
+        uint8_t *rootp = dma_resolve(root, &copy, &sw);
+        if (devp && rootp && copy) {
+            if (dir) memcpy(rootp, devp, copy);
+            else     memcpy(devp, rootp, copy);
+            if (log) {
+                dma_log++;
+                printf("[%s-DMA] %u bytes %s 0x%08X(%s) %s 0x%08X(%s)\n",
+                       name, copy, dir ? "from" : "to", device, dw,
+                       dir ? "to" : "from", root, sw);
+            }
+        } else if (log) {
+            dma_log++;
+            printf("[%s-DMA] unmapped: device 0x%08X dest %s, root 0x%08X %s, len %u\n",
+                   name, device, devp ? "ok" : "no", root, rootp ? "ok" : "no", len);
+        }
+    }
+
+    /* Clear the start bit and length: this is what the game is waiting on. */
+    hw->hw_regs[hw_reg_idx(base + DMA_OFF_START)] = 0;
+    hw->hw_regs[hw_reg_idx(base + DMA_OFF_LEN)] = 0;
+    hw->sb_istnrm |= (1u << istnrm_bit);
+}
+
 static int hw_write_log = 0;
 
 /* SH4 DMAC register indices (0xFFA00000 base, 4 bytes each) */
@@ -277,6 +389,12 @@ void dc_hw_write32(DCHardware *hw, uint32_t addr, uint32_t val) {
         hw->ta_fifo_pos = 0;
         pvr2_ta_reset();
         break;
+
+    /* G2 channels: AICA, Ext1, Ext2, Dev - and the PVR channel. */
+    case 0x005F7818: if (val & 1) run_dma(hw, 0x005F7800, 14, "AICA"); return;
+    case 0x005F7838: if (val & 1) run_dma(hw, 0x005F7820, 15, "EXT1"); return;
+    case 0x005F7858: if (val & 1) run_dma(hw, 0x005F7840, 16, "EXT2"); return;
+    case 0x005F7878: if (val & 1) run_dma(hw, 0x005F7860, 17, "DEV");  return;
 
     case SB_C2DST:
         if (val & 1) {

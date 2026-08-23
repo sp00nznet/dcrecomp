@@ -220,6 +220,10 @@ uint8_t *sh4_get_vram_ptr(void) {
     return g_cpu_ref ? g_cpu_ref->vram : NULL;
 }
 
+uint8_t *sh4_get_aica_ram_ptr(void) {
+    return g_cpu_ref ? g_cpu_ref->aica_ram : NULL;
+}
+
 uint32_t sh4_get_ram_size(void) {
     return g_cpu_ref ? g_cpu_ref->ram_size : 0;
 }

@@ -118,9 +118,15 @@ void sh4_set_irq_handler(void (*handler)(SH4CPU *cpu)) {
  * Zero means the game has not routed it anywhere, so nothing should fire. */
 static int vblank_irl_level(void) {
     const uint32_t VBL_IN = 1u << 3;
-    if (dc_hw_read32(g_hardware, SB_IML6NRM) & VBL_IN) return 6;
-    if (dc_hw_read32(g_hardware, SB_IML4NRM) & VBL_IN) return 4;
-    if (dc_hw_read32(g_hardware, SB_IML2NRM) & VBL_IN) return 2;
+    /* Holly's three interrupt levels are wired to SH-4 IRL 13, 11 and 9 - not
+     * to 6, 4 and 2, which are just what the registers are named after. Getting
+     * this wrong matters: a game that masks to IMASK=8 around video setup still
+     * expects VBlank, because IRL 13 is above the mask. Treating it as level 6
+     * blocked it, and the vblank wait in the middle of the mode change never
+     * finished. */
+    if (dc_hw_read32(g_hardware, SB_IML6NRM) & VBL_IN) return 13;
+    if (dc_hw_read32(g_hardware, SB_IML4NRM) & VBL_IN) return 11;
+    if (dc_hw_read32(g_hardware, SB_IML2NRM) & VBL_IN) return 9;
 
     /* Nothing routed. On hardware the BIOS programs these before handing
      * control to the game, and we bypass the BIOS - Crazy Taxi happens to set
@@ -128,7 +134,7 @@ static int vblank_irl_level(void) {
      * deliver" would mean such a game gets no interrupts at all, so assume the
      * mid IRL. The SR.BL and SR.IMASK checks below still do the real work of
      * keeping us out of critical sections. */
-    return 4;
+    return 11;
 }
 
 void sh4_poll_irq(SH4CPU *cpu) {

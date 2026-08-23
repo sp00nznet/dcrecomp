@@ -56,18 +56,23 @@ void sh4_dump_native_stack(const char *tag) { (void)tag; }
  * Answers "which code sets this flag", which grep cannot when the address is
  * register-relative in the generated C. */
 static uint32_t g_watch_addr = 0;
+static uint32_t g_watch_addr2 = 0;
 static int g_watch_init = 0;
 
 static void watch_check(uint32_t addr, uint32_t val) {
     if (!g_watch_init) {
         const char *e = getenv("DCRECOMP_WATCH");
         g_watch_addr = e ? (uint32_t)strtoul(e, NULL, 0) : 0;
+        const char *e2 = getenv("DCRECOMP_WATCH2");
+        g_watch_addr2 = e2 ? (uint32_t)strtoul(e2, NULL, 0) : 0;
         g_watch_init = 1;
     }
-    if (g_watch_addr && (addr & 0x1FFFFFFF) == (g_watch_addr & 0x1FFFFFFF)) {
+    int hit = (g_watch_addr  && (addr & 0x1FFFFFFF) == (g_watch_addr  & 0x1FFFFFFF))
+           || (g_watch_addr2 && (addr & 0x1FFFFFFF) == (g_watch_addr2 & 0x1FFFFFFF));
+    if (hit) {
         static unsigned long n = 0;
         n++;
-        if (n <= 4 || (n % 5000) == 0) {
+        if (n <= 8 || (n % 5000) == 0) {
             printf("[WATCH] write 0x%08X = 0x%08X\n", addr, val);
             sh4_dump_native_stack("watch");
         }

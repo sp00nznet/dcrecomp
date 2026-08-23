@@ -717,8 +717,9 @@ void dc_aica_update(DCHardware *hw) {
  * this is a command the driver never learns about. */
 void dc_gdrom_signal_complete(DCHardware *hw) {
     if (!hw) return;
-    hw->sb_istext |= 1u;
-    hw->sb_istnrm |= (1u << 30);
+    hw->sb_istext |= 1u;          /* external: GD-ROM */
+    hw->sb_istnrm |= (1u << 30);  /* summary bit for external interrupts */
+    hw->sb_istnrm |= (1u << 14);  /* G1 DMA end - how a DMAREAD finishes */
 }
 
 void dc_gdrom_init(DCHardware *hw) {

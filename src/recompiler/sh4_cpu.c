@@ -155,7 +155,10 @@ void sh4_poll_irq(SH4CPU *cpu) {
     int level = vblank_irl_level();
     if (level == 0) { g_irq_masked++; return; }
     if (cpu->sr & SR_BL) { g_irq_masked++; return; }
-    if ((int)((cpu->sr & SR_IMASK) >> 4) >= level) { g_irq_masked++; return; }
+    if ((int)((cpu->sr & SR_IMASK) >> 4) >= level) {
+        g_irq_masked++;
+        if (!getenv("DCRECOMP_IGNORE_IMASK")) return;
+    }
 
     SH4IrqFrame f;
     memcpy(f.r, cpu->r, sizeof f.r);

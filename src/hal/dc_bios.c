@@ -136,6 +136,7 @@ static int g_track_count = 0;
 static uint32_t g_disc_start_lba = 0;   /* first data track, for the TOC */
 static uint32_t g_gdc_next_id = 1;
 static uint32_t g_gdc_last_id = 0;
+static uint32_t g_gdc_reported_id = 0xFFFFFFFFu;
 
 void sh4_bios_set_gdrom_track(const char *path, uint32_t start_lba) {
     if (g_track_count >= GDC_MAX_TRACKS) {
@@ -178,8 +179,21 @@ static int gdc_read_sectors(SH4CPU *cpu, uint32_t lba, uint32_t count, uint32_t 
             break;
         }
         const uint8_t *user = sector + GDC_DATA_OFFSET;
-        for (uint32_t b = 0; b < GDC_SECTOR_SIZE; b++)
-            sh4_write8(cpu, dest + i * GDC_SECTOR_SIZE + b, user[b]);
+        uint32_t at = dest + i * GDC_SECTOR_SIZE;
+
+        /* Straight into RAM when the destination is RAM, which it always is for
+         * a disc transfer. Going through sh4_write8 a byte at a time made a
+         * game that streams assets - this one issues 20k reads a minute -
+         * spend all its time in the copy. */
+        uint8_t *ram = sh4_get_ram_ptr();
+        uint32_t phys = at & 0x1FFFFFFF;
+        if (ram && phys >= DC_RAM_BASE &&
+            phys + GDC_SECTOR_SIZE <= DC_RAM_BASE + sh4_get_ram_size()) {
+            memcpy(ram + (phys & sh4_get_ram_mask()), user, GDC_SECTOR_SIZE);
+        } else {
+            for (uint32_t b = 0; b < GDC_SECTOR_SIZE; b++)
+                sh4_write8(cpu, at + b, user[b]);
+        }
     }
     return 0;
 }
@@ -193,7 +207,11 @@ static int gdc_exec(SH4CPU *cpu, uint32_t cmd, uint32_t param) {
         uint32_t lba   = sh4_read32(cpu, param);
         uint32_t count = sh4_read32(cpu, param + 4);
         uint32_t dest  = sh4_read32(cpu, param + 8);
-        if (logged < 12) {
+        { static unsigned long n = 0, sectors = 0;
+          n++; sectors += count;
+          if ((n % 20000) == 0)
+              printf("[BIOS] gdrom: %lu reads, %lu sectors (%lu KB)\n", n, sectors, sectors * 2); }
+        if (logged < 8) {
             logged++;
             printf("[BIOS] gdrom read: lba %u x%u -> 0x%08X\n", lba, count, dest);
         }
@@ -215,7 +233,7 @@ static int gdc_exec(SH4CPU *cpu, uint32_t cmd, uint32_t param) {
         }
         return 0;
     default:
-        if (logged < 12) {
+        if (logged < 8) {
             logged++;
             printf("[BIOS] gdrom: unhandled command %u (param 0x%08X)\n", cmd, param);
         }
@@ -227,7 +245,7 @@ static int syscall_gdrom(SH4CPU *cpu) {
     switch (cpu->r[7]) {
     case 0: {   /* ReqCmd(cmd, param) -> request id, 0 on refusal */
         static int reqlog = 0;
-        if (reqlog < 20) {
+        if (reqlog < 8) {
             reqlog++;
             printf("[BIOS] gdrom ReqCmd cmd=%u param=0x%08X\n", cpu->r[4], cpu->r[5]);
         }
@@ -247,6 +265,14 @@ static int syscall_gdrom(SH4CPU *cpu) {
         if (cpu->r[5]) {
             for (int i = 0; i < 4; i++)
                 sh4_write32(cpu, cpu->r[5] + i * 4, 0);
+        }
+        /* Report PROCESSING once, then COMPLETED. A driver written against a
+         * real drive watches for the busy->done transition; handing it
+         * COMPLETED on the first ask means that edge never happens, and the
+         * ones that latch state on it just reissue the command forever. */
+        if (cpu->r[4] != g_gdc_reported_id) {
+            g_gdc_reported_id = cpu->r[4];
+            return 1;   /* PROCESSING */
         }
         return 2;   /* COMPLETED */
     }

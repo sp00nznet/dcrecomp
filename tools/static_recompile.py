@@ -190,7 +190,9 @@ class SH4Recompiler:
 
         # Addresses reached by a direct jump. Used to keep the instruction
         # walk in step when a literal pool decodes as a branch.
-        self.entry_hints = self._mova_targets() | self._external_branch_targets()
+        self.entry_hints = (self._mova_targets()
+                            | self._external_branch_targets()
+                            | self._jump_table_targets())
 
         self._resolve_mid_entries()
 
@@ -289,6 +291,67 @@ class SH4Recompiler:
         if not has_delay:
             return False
         return self.offset_to_addr(offset + 2) not in self.entry_hints
+
+    def _jump_table_targets(self):
+        """Targets of `braf`/`bsrf` fed from a mova'd displacement table.
+
+        The GCC SH idiom is:
+
+            shll   r0                  ; index *= 2
+            mov    r0, r1
+            mova   @(disp,PC), r0      ; r0 = table
+            mov.w  @(r0,r1), r0        ; r0 = table[index]
+            braf   r0                  ; PC = braf + 4 + r0
+
+        so each entry is a forward displacement from just past the branch. The
+        table has no length marker; it is followed immediately by code, so read
+        entries while they still land on an even address a sane distance ahead
+        and stop at the first one that does not.
+        """
+        WINDOW = 0x4000          # switch arms live close to the branch
+        MAX_ENTRIES = 256
+        targets = set()
+
+        for offset in range(0, self.size - 1, 2):
+            opcode = self.read_u16(offset)
+            if (opcode & 0xF0FF) not in (0x0023, 0x0003):   # braf / bsrf
+                continue
+            reg = (opcode >> 8) & 0xF
+            braf_pc = self.offset_to_addr(offset)
+
+            # Walk back for the mova that loaded the table, and the load that
+            # indexes it - the load width tells us the entry size.
+            table = None
+            entry_size = 2
+            for back in range(2, 20, 2):
+                if offset - back < 0:
+                    break
+                prev = self.read_u16(offset - back)
+                if (prev & 0xFF00) == 0xC700:               # mova @(disp,PC),r0
+                    pc = self.offset_to_addr(offset - back)
+                    table = (((pc + 4) & 0xFFFFFFFC) + (prev & 0xFF) * 4)
+                    break
+                if (prev & 0xF00F) == 0x000C and ((prev >> 8) & 0xF) == reg:
+                    entry_size = 1                          # mov.b @(R0,Rm),Rn
+            if table is None:
+                continue
+
+            base = braf_pc + 4
+            for i in range(MAX_ENTRIES):
+                off = self.addr_to_offset(table) + i * entry_size
+                if off < 0 or off + entry_size > self.size:
+                    break
+                if entry_size == 2:
+                    disp = self.read_u16(off)
+                else:
+                    disp = self.data[off] * 2
+                target = base + disp
+                if (target & 1) or not (base <= target < base + WINDOW):
+                    break
+                if not (self.base <= target < self.base + self.size):
+                    break
+                targets.add(target)
+        return targets
 
     def _mova_targets(self):
         """Addresses produced by MOVA @(disp,PC),R0.

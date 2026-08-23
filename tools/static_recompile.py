@@ -1278,6 +1278,7 @@ class SH4Recompiler:
         with open(output_path, 'w') as f:
             f.write("/* Auto-generated function dispatch table */\n")
             f.write("#include \"game/game_functions.h\"\n")
+            f.write("#include \"hal/dc_bios.h\"\n")
             f.write("#include <stddef.h>\n\n")
 
             f.write("typedef struct {\n")
@@ -1310,6 +1311,9 @@ class SH4Recompiler:
             f.write("void sh4_call_indirect(SH4CPU *cpu) {\n")
             f.write("    /* Normalize: strip P1/P2/P3 area bits to P1 cached form */\n")
             f.write("    uint32_t phys = cpu->pc & 0x1FFFFFFF;\n")
+            f.write("    /* A call through the BIOS vector table is a syscall, not\n")
+            f.write("     * a function in this binary. */\n")
+            f.write("    if (sh4_bios_syscall(cpu)) return;\n")
             f.write("    uint32_t lookup = phys | 0x80000000;\n")
             f.write("    void (*fn)(SH4CPU *cpu) = find_function(lookup);\n")
             f.write("    if (!fn) {\n")

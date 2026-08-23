@@ -49,6 +49,7 @@ endif()
 # ========== dcrecomp core library ==========
 add_library(dcrecomp_core STATIC
     src/recompiler/sh4_cpu.c
+    src/recompiler/sh4_task.c
     src/hal/dc_hardware.c
     src/hal/naomi_io.c
     src/hal/pvr2_ta.c

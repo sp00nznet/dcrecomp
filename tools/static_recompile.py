@@ -1216,8 +1216,13 @@ class SH4Recompiler:
                         lines.append(f"    {delay_code} /* delay slot */")
                         lines.append(f"    sh4_call_indirect(cpu);")
                     elif "jmp" in code or "braf" in code:
-                        lines.append(f"    {delay_code} /* delay slot */")
+                        # The target register is read before the delay slot
+                        # runs, so latch it first. A jump table dispatcher
+                        # reloads the same register in its slot - emitting the
+                        # slot first sends the jump wherever that reload
+                        # happened to land, usually address 0.
                         lines.append(f"    {code}")
+                        lines.append(f"    {delay_code} /* delay slot */")
                         lines.append(f"    sh4_jump_indirect(cpu);")
                         lines.append(f"    return;")
                     else:

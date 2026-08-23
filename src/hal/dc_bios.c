@@ -9,6 +9,7 @@
  */
 
 #include "hal/dc_bios.h"
+#include "hal/dc_hardware.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -124,21 +125,41 @@ static int syscall_romfont(SH4CPU *cpu) {
 #define GDC_RAW_SECTOR    2352
 #define GDC_DATA_OFFSET   16      /* MODE1: sync + header before user data */
 
-static FILE *g_disc = NULL;
-static uint32_t g_disc_start_lba = 0;
+#define GDC_MAX_TRACKS 24
+
+static struct {
+    FILE *f;
+    uint32_t start_lba;
+    uint32_t sectors;
+} g_tracks[GDC_MAX_TRACKS];
+static int g_track_count = 0;
+static uint32_t g_disc_start_lba = 0;   /* first data track, for the TOC */
 static uint32_t g_gdc_next_id = 1;
 static uint32_t g_gdc_last_id = 0;
 
 void sh4_bios_set_gdrom_track(const char *path, uint32_t start_lba) {
-    if (g_disc)
-        fclose(g_disc);
-    g_disc = fopen(path, "rb");
-    g_disc_start_lba = start_lba;
-    if (g_disc)
-        printf("[BIOS] gdrom: serving sectors from %s (track starts at LBA %u)\n",
-               path, start_lba);
-    else
-        printf("[BIOS] gdrom: cannot open %s - reads will return zeros\n", path);
+    if (g_track_count >= GDC_MAX_TRACKS) {
+        printf("[BIOS] gdrom: too many tracks, ignoring %s\n", path);
+        return;
+    }
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        printf("[BIOS] gdrom: cannot open %s\n", path);
+        return;
+    }
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    g_tracks[g_track_count].f = f;
+    g_tracks[g_track_count].start_lba = start_lba;
+    g_tracks[g_track_count].sectors = (uint32_t)(size / GDC_RAW_SECTOR);
+    if (g_track_count == 0)
+        g_disc_start_lba = start_lba;
+    printf("[BIOS] gdrom: track %d = %s, LBA %u..%u\n",
+           g_track_count, path, start_lba,
+           start_lba + g_tracks[g_track_count].sectors - 1);
+    g_track_count++;
 }
 
 /* Copy `count` 2048-byte sectors starting at absolute `lba` into guest memory. */
@@ -146,10 +167,15 @@ static int gdc_read_sectors(SH4CPU *cpu, uint32_t lba, uint32_t count, uint32_t 
     static uint8_t sector[GDC_RAW_SECTOR];
     for (uint32_t i = 0; i < count; i++) {
         memset(sector, 0, sizeof sector);
-        if (g_disc && lba + i >= g_disc_start_lba) {
-            long off = (long)(lba + i - g_disc_start_lba) * GDC_RAW_SECTOR;
-            if (fseek(g_disc, off, SEEK_SET) == 0)
-                fread(sector, 1, GDC_RAW_SECTOR, g_disc);
+        uint32_t want = lba + i;
+        for (int t = 0; t < g_track_count; t++) {
+            if (want < g_tracks[t].start_lba ||
+                want >= g_tracks[t].start_lba + g_tracks[t].sectors)
+                continue;
+            long off = (long)(want - g_tracks[t].start_lba) * GDC_RAW_SECTOR;
+            if (fseek(g_tracks[t].f, off, SEEK_SET) == 0)
+                fread(sector, 1, GDC_RAW_SECTOR, g_tracks[t].f);
+            break;
         }
         const uint8_t *user = sector + GDC_DATA_OFFSET;
         for (uint32_t b = 0; b < GDC_SECTOR_SIZE; b++)
@@ -207,6 +233,10 @@ static int syscall_gdrom(SH4CPU *cpu) {
         }
         g_gdc_last_id = g_gdc_next_id++;
         gdc_exec(cpu, cpu->r[4], cpu->r[5]);
+        /* Tell the driver its command finished. It registered a completion
+         * callback and is waiting on the drive's interrupt, so finishing
+         * quietly leaves it waiting forever. */
+        dc_gdrom_signal_complete(sh4_get_hardware());
         return (int)g_gdc_last_id;
     }
     case 1: {   /* GetCmdStat(id, stat[4]).
@@ -227,8 +257,11 @@ static int syscall_gdrom(SH4CPU *cpu) {
         return 0;
     case 4:     /* GetDrvStat(stat[2]): standby, and a GD-ROM in the drive */
         if (cpu->r[4]) {
-            sh4_write32(cpu, cpu->r[4], 2);     /* standby: disc in, idle */
-            sh4_write32(cpu, cpu->r[4] + 4, 8); /* disc type: GD-ROM */
+            /* Drive status: 0 busy, 1 pause, 2 standby, 3 play, 4 seek,
+             * 5 scan, 6 open, 7 no disc, 8 retry, 9 error.
+             * Disc type: 0x00 CDDA, 0x10 CDROM, 0x20 XA, 0x30 CDI, 0x80 GDROM. */
+            sh4_write32(cpu, cpu->r[4], 2);        /* standby: disc in, idle */
+            sh4_write32(cpu, cpu->r[4] + 4, 0x80); /* GD-ROM */
         }
         return 0;
     default:

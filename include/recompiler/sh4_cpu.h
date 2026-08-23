@@ -147,6 +147,7 @@ void sh4_destroy(SH4CPU *cpu);
 /* Set external hardware reference for register routing */
 struct DCHardware;
 void sh4_set_hardware(struct DCHardware *hw);
+struct DCHardware *sh4_get_hardware(void);
 void sh4_set_cpu_ref(SH4CPU *cpu);
 
 /* Get raw memory pointers (for DMA) */

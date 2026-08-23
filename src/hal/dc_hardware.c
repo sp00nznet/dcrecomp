@@ -711,6 +711,16 @@ void dc_aica_update(DCHardware *hw) {
 
 /* ========== GD-ROM ========== */
 
+/* The drive signals completion with an external interrupt: SB_ISTEXT bit 0,
+ * summarised into SB_ISTNRM bit 30. A game's interrupt dispatcher is what then
+ * runs the driver's completion callback, so a command that finishes without
+ * this is a command the driver never learns about. */
+void dc_gdrom_signal_complete(DCHardware *hw) {
+    if (!hw) return;
+    hw->sb_istext |= 1u;
+    hw->sb_istnrm |= (1u << 30);
+}
+
 void dc_gdrom_init(DCHardware *hw) {
     printf("[GDROM] Drive initialized\n");
     hw->gdrom_status = 0;

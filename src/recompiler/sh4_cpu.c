@@ -178,6 +178,10 @@ void sh4_poll_irq(SH4CPU *cpu) {
     memcpy(cpu->xf, f.xf, sizeof f.xf);
 }
 
+DCHardware *sh4_get_hardware(void) {
+    return g_hardware;
+}
+
 void sh4_set_hardware(DCHardware *hw) {
     g_hardware = hw;
 }

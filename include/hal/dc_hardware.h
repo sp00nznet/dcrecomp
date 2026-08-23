@@ -188,6 +188,7 @@ void dc_aica_update(DCHardware *hw);
 
 /* GD-ROM operations */
 void dc_gdrom_init(DCHardware *hw);
+void dc_gdrom_signal_complete(DCHardware *hw);
 int dc_gdrom_read_sectors(DCHardware *hw, uint32_t lba, uint32_t count, void *buf);
 
 #endif /* DC_HARDWARE_H */

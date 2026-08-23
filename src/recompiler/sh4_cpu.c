@@ -123,6 +123,19 @@ void sh4_set_irq_handler(void (*handler)(SH4CPU *cpu)) {
  * Zero means the game has not routed it anywhere, so nothing should fire. */
 static int vblank_irl_level(void) {
     const uint32_t VBL_IN = 1u << 3;
+    uint32_t pend = dc_hw_get_istnrm(g_hardware);
+    if (!pend)
+        return 0;
+
+    /* Whatever the game has routed, at the level it routed it to. VBlank is
+     * not special - a DMA completion or an end-of-list the game is waiting on
+     * has to reach it too, and waiting for the next VBlank to deliver one is
+     * how a transfer that finished instantly still takes a frame. */
+    if (pend & dc_hw_read32(g_hardware, SB_IML6NRM)) return 13;
+    if (pend & dc_hw_read32(g_hardware, SB_IML4NRM)) return 11;
+    if (pend & dc_hw_read32(g_hardware, SB_IML2NRM)) return 9;
+    if (!(pend & VBL_IN))
+        return 0;
     /* Holly's three interrupt levels are wired to SH-4 IRL 13, 11 and 9 - not
      * to 6, 4 and 2, which are just what the registers are named after. Getting
      * this wrong matters: a game that masks to IMASK=8 around video setup still
@@ -152,11 +165,17 @@ void sh4_poll_irq(SH4CPU *cpu) {
 
     uint64_t now = platform_get_ticks_ms();
     if (g_last_vblank_ms == 0) g_last_vblank_ms = now;
-    if (now - g_last_vblank_ms < 16) return;   /* ~60Hz */
-    g_last_vblank_ms = now;
-
-    dc_pvr_wait_vblank(g_hardware);            /* raises SB_ISTNRM VBlank-IN */
+    if (now - g_last_vblank_ms >= 16) {        /* ~60Hz */
+        g_last_vblank_ms = now;
+        dc_pvr_wait_vblank(g_hardware);        /* raises SB_ISTNRM VBlank-IN */
+    }
     if (!g_irq_handler) return;
+
+    /* One delivery per millisecond at most. The handler clears what it
+     * services, so this only bites when a bit is set that nothing handles -
+     * and then it costs a delivery per millisecond rather than a spin. */
+    static uint64_t last_deliver_ms = 0;
+    if (now == last_deliver_ms) return;
 
     /* Respect the CPU's own masking. Delivering into a critical section the
      * game had closed leaves it re-entered halfway through its own bookkeeping,
@@ -187,6 +206,7 @@ void sh4_poll_irq(SH4CPU *cpu) {
                        every = e ? atoi(e) : 0; }
       if (every > 0 && (++n % every) == 0) sh4_dump_native_stack("irq"); }
 
+    last_deliver_ms = now;
     g_in_irq = true;
     g_irq_delivered++;
     g_irq_handler(cpu);
@@ -222,6 +242,23 @@ uint8_t *sh4_get_vram_ptr(void) {
 
 uint8_t *sh4_get_aica_ram_ptr(void) {
     return g_cpu_ref ? g_cpu_ref->aica_ram : NULL;
+}
+
+/* Words the sound driver would have published. Overriding the read rather than
+ * writing sound RAM keeps the value out of reach of the DMA that uploads the
+ * driver, which lands on top of it. */
+#define AICA_PUBLISHED_MAX 8
+static struct { uint32_t offset, value; } g_aica_published[AICA_PUBLISHED_MAX];
+static int g_aica_published_n = 0;
+
+void sh4_aica_publish(uint32_t offset, uint32_t value) {
+    if (g_aica_published_n >= AICA_PUBLISHED_MAX)
+        return;
+    g_aica_published[g_aica_published_n].offset = offset;
+    g_aica_published[g_aica_published_n].value = value;
+    g_aica_published_n++;
+    printf("[AICA] sound RAM +0x%X reads as 0x%08X (driver stub)\n",
+           offset, value);
 }
 
 uint32_t sh4_get_ram_size(void) {
@@ -535,7 +572,30 @@ uint32_t sh4_read32(SH4CPU *cpu, uint32_t addr) {
         return *(uint32_t *)(cpu->vram + (phys - 0x05000000));
     }
     if (phys >= DC_AICA_BASE && phys < DC_AICA_BASE + DC_AICA_SIZE) {
-        return *(uint32_t *)(cpu->aica_ram + (phys - DC_AICA_BASE));
+        uint32_t off = phys - DC_AICA_BASE;
+        uint32_t v = *(uint32_t *)(cpu->aica_ram + off);
+        /* Only answer while nothing has written the word. If the game puts
+         * its own value there, that is the real state and it wins. */
+        if (v == 0)
+            for (int i = 0; i < g_aica_published_n; i++)
+                if (g_aica_published[i].offset == off)
+                    return g_aica_published[i].value;
+        /* A word in sound RAM read over and over is the CPU waiting on the
+         * sound driver, which runs on a processor we do not have. Naming the
+         * address and the value it is stuck on is the first thing anyone
+         * needs. Set DCRECOMP_AICAPOLL to see them. */
+        static int aicalog = -1;
+        if (aicalog < 0) aicalog = getenv("DCRECOMP_AICAPOLL") ? 1 : 0;
+        if (aicalog) {
+            static uint32_t last = 0; static unsigned n = 0; static int said = 0;
+            if (phys == last) {
+                if (++n == 20000 && said < 12) {
+                    said++;
+                    printf("[AICA] 0x%08X read %u times, stuck on 0x%08X\n", phys, n, v);
+                }
+            } else { last = phys; n = 1; }
+        }
+        return v;
     }
     if (is_hw_register(phys) && g_hardware) {
         return dc_hw_read32(g_hardware, phys);

@@ -7,6 +7,7 @@
  */
 
 #include "hal/pvr2.h"
+#include "hal/dc_hardware.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -318,14 +319,26 @@ static void ta_process_vertex(const uint32_t *data) {
 
 /* ========== Packet Entry Point ========== */
 
+/* The list a game is currently filling. An End Of List parameter carries no
+ * usable list type of its own, so the interrupt it raises is the one for
+ * whatever list the polygons before it belonged to. */
+static int open_list = 0;
+
 static void ta_process_packet(const uint32_t *data) {
     int para_type = (data[0] >> 29) & 7;
     type_counts[para_type]++;
 
     switch (para_type) {
-    case TA_PARAM_END_OF_LIST:
+    case TA_PARAM_END_OF_LIST: {
+        /* One interrupt per list type, and the game waits for the one
+         * belonging to the list it just filled. Opaque, opaque modifier,
+         * translucent and translucent modifier are consecutive; punch-through
+         * sits on its own bit. */
+        static const int eol_bit[8] = { 7, 8, 9, 10, 21, 21, 21, 21 };
+        dc_hw_raise_istnrm(eol_bit[open_list & 7]);
         g_ta.strip_count = 0;
         break;
+    }
 
     case TA_PARAM_USER_CLIP:
         /* TODO: implement user clipping */
@@ -334,6 +347,7 @@ static void ta_process_packet(const uint32_t *data) {
     case TA_PARAM_POLYGON:
     case TA_PARAM_SPRITE: {
         int lt = (data[0] >> 24) & 7;
+        open_list = lt;
         list_type_hist[lt]++;
         int poly_size = ta_poly_size(data[0]);
         if (poly_size == 64) {

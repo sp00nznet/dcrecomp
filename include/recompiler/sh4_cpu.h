@@ -154,6 +154,17 @@ void sh4_set_cpu_ref(SH4CPU *cpu);
 uint8_t *sh4_get_ram_ptr(void);
 uint8_t *sh4_get_vram_ptr(void);
 uint8_t *sh4_get_aica_ram_ptr(void);
+
+/* Answer reads of one word of sound RAM with `value`, as the sound
+ * driver would have. The driver runs on the AICA's ARM7, which we do not
+ * execute, so a game that waits for it to report itself ready waits
+ * forever. `offset` is relative to the start of sound RAM.
+ *
+ * A stub, and only worth having until there is an ARM7 to run: the game
+ * gets past its sound init and no sound comes out. Which word and which
+ * value belong to the driver, so the game declares them, not the hardware
+ * model. DCRECOMP_AICAPOLL names any word a game is stuck reading. */
+void sh4_aica_publish(uint32_t offset, uint32_t value);
 uint32_t sh4_get_ram_size(void);
 uint32_t sh4_get_ram_mask(void);
 

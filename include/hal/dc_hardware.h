@@ -173,6 +173,13 @@ void dc_pvr_start_render(DCHardware *hw);
 void dc_pvr_submit_vertex(DCHardware *hw, const PVRVertex *vtx);
 void dc_pvr_begin_list(DCHardware *hw, PVRListType type);
 void dc_pvr_end_list(DCHardware *hw);
+/* Set a bit in SB_ISTNRM. For parts of the model that finish something a
+ * game is waiting on and have no DCHardware of their own. */
+void dc_hw_raise_istnrm(int bit);
+
+/* Pending SB_ISTNRM bits, without counting as a read of the register. */
+uint32_t dc_hw_get_istnrm(DCHardware *hw);
+
 void dc_pvr_wait_vblank(DCHardware *hw);
 
 /* Controller operations */

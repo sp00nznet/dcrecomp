@@ -157,10 +157,23 @@ uint32_t dc_hw_read32(DCHardware *hw, uint32_t addr) {
     }
 
     case 0x005F810C: { /* SPG_STATUS - sync pulse generator status */
-        /* Simulate scanline counter progressing at ~31.5kHz (525 lines per frame @ 60Hz) */
+        /* One line per read.
+         *
+         * Deriving the line from the millisecond clock looks more honest but
+         * is not: the value then changes once per millisecond, so it steps by
+         * about 31 lines at a time and a game waiting for one particular line
+         * mostly steps straight over it. ChuChu Rocket's frame loop spent
+         * 300,000 reads per frame that way.
+         *
+         * ponytail: the line count no longer measures time, so a game that
+         * counts lines to time something will be wrong. None seen yet - they
+         * wait for a line or for vblank, and both arrive promptly. Frame pace
+         * still comes from the 60Hz VBlank interrupt, not from here. Anchor
+         * this to a microsecond clock if a game ever needs the real rate. */
         uint64_t now = platform_get_ticks_ms();
-        /* Each millisecond ≈ 31.5 scanlines */
-        uint32_t scanline = (uint32_t)((now * 315) / 10) % 525;
+        static uint32_t line = 0;
+        line = (line + 1) % 525;
+        uint32_t scanline = line;
         uint32_t vsync = (scanline >= 480) ? 1 : 0;  /* VSync during lines 480-524 */
         uint32_t blank = vsync;  /* Blank during VBlank */
         uint32_t fieldnum = (uint32_t)(now / 16) & 1; /* Alternate fields */
@@ -601,6 +614,16 @@ void dc_pvr_begin_list(DCHardware *hw, PVRListType type) {
 void dc_pvr_end_list(DCHardware *hw) {
     (void)hw;
     /* TODO: End polygon list */
+}
+
+uint32_t dc_hw_get_istnrm(DCHardware *hw) {
+    return hw ? hw->sb_istnrm : 0;
+}
+
+void dc_hw_raise_istnrm(int bit) {
+    DCHardware *hw = sh4_get_hardware();
+    if (hw)
+        hw->sb_istnrm |= (1u << bit);
 }
 
 void dc_pvr_wait_vblank(DCHardware *hw) {

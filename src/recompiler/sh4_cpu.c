@@ -51,6 +51,29 @@ void sh4_dump_native_stack(const char *tag) {
 void sh4_dump_native_stack(const char *tag) { (void)tag; }
 #endif
 
+/* Write watchpoint. Set DCRECOMP_WATCH to an address (hex, 0x-prefixed) and
+ * every 32-bit write to it prints the value and the recompiled call chain.
+ * Answers "which code sets this flag", which grep cannot when the address is
+ * register-relative in the generated C. */
+static uint32_t g_watch_addr = 0;
+static int g_watch_init = 0;
+
+static void watch_check(uint32_t addr, uint32_t val) {
+    if (!g_watch_init) {
+        const char *e = getenv("DCRECOMP_WATCH");
+        g_watch_addr = e ? (uint32_t)strtoul(e, NULL, 0) : 0;
+        g_watch_init = 1;
+    }
+    if (g_watch_addr && (addr & 0x1FFFFFFF) == (g_watch_addr & 0x1FFFFFFF)) {
+        static int n = 0;
+        if (n < 20) {
+            n++;
+            printf("[WATCH] write 0x%08X = 0x%08X\n", addr, val);
+            sh4_dump_native_stack("watch");
+        }
+    }
+}
+
 /* External hardware reference (set during init) */
 static DCHardware *g_hardware = NULL;
 static SH4CPU *g_cpu_ref = NULL;
@@ -497,6 +520,7 @@ float sh4_read_float(SH4CPU *cpu, uint32_t addr) {
 }
 
 void sh4_write8(SH4CPU *cpu, uint32_t addr, uint8_t val) {
+    watch_check(addr, (uint32_t)val);
     uint32_t phys = translate_addr(addr);
 
     if (phys >= DC_RAM_BASE && phys < DC_RAM_BASE + cpu->ram_size) {
@@ -528,6 +552,7 @@ void sh4_write8(SH4CPU *cpu, uint32_t addr, uint8_t val) {
 }
 
 void sh4_write16(SH4CPU *cpu, uint32_t addr, uint16_t val) {
+    watch_check(addr, (uint32_t)val);
     uint32_t phys = translate_addr(addr);
 
     if (phys >= DC_RAM_BASE && phys < DC_RAM_BASE + cpu->ram_size) {
@@ -559,6 +584,7 @@ void sh4_write16(SH4CPU *cpu, uint32_t addr, uint16_t val) {
 uint32_t g_write_seq = 0;
 
 void sh4_write32(SH4CPU *cpu, uint32_t addr, uint32_t val) {
+    watch_check(addr, val);
     g_write_seq++;
 
     /* Handle ALL P4 area (0xE0000000+) BEFORE address translation */

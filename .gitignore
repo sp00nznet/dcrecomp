@@ -1,0 +1,11 @@
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Build artifacts
+build/
+*.o
+*.obj
+*.exe
+*.lib
+*.pdb

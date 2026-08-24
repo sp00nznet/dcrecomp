@@ -856,19 +856,19 @@ class SH4Recompiler:
         # ---- Floating point ----
 
         if (opcode & 0xF00F) == 0xF00C:  # FMOV
-            return f"cpu->fr[{n}] = cpu->fr[{m}];", False, None, False
+            return f"sh4_fmov_reg(cpu, {n}, {m});", False, None, False
         if (opcode & 0xF00F) == 0xF008:  # FMOV.S @Rm, FRn
-            return f"cpu->fr[{n}] = sh4_read_float(cpu, cpu->r[{m}]);", False, None, False
+            return f"sh4_fmov_load(cpu, {n}, cpu->r[{m}]);", False, None, False
         if (opcode & 0xF00F) == 0xF00A:  # FMOV.S FRm, @Rn
-            return f"sh4_write_float(cpu, cpu->r[{n}], cpu->fr[{m}]);", False, None, False
+            return f"sh4_fmov_store(cpu, {m}, cpu->r[{n}]);", False, None, False
         if (opcode & 0xF00F) == 0xF009:  # FMOV.S @Rm+, FRn
-            return f"cpu->fr[{n}] = sh4_read_float(cpu, cpu->r[{m}]); cpu->r[{m}] += 4;", False, None, False
+            return f"sh4_fmov_load_inc(cpu, {n}, {m});", False, None, False
         if (opcode & 0xF00F) == 0xF00B:  # FMOV.S FRm, @-Rn
-            return f"cpu->r[{n}] -= 4; sh4_write_float(cpu, cpu->r[{n}], cpu->fr[{m}]);", False, None, False
+            return f"sh4_fmov_store_dec(cpu, {m}, {n});", False, None, False
         if (opcode & 0xF00F) == 0xF006:  # FMOV.S @(R0,Rm), FRn
-            return f"cpu->fr[{n}] = sh4_read_float(cpu, cpu->r[0] + cpu->r[{m}]);", False, None, False
+            return f"sh4_fmov_load(cpu, {n}, cpu->r[0] + cpu->r[{m}]);", False, None, False
         if (opcode & 0xF00F) == 0xF007:  # FMOV.S FRm, @(R0,Rn)
-            return f"sh4_write_float(cpu, cpu->r[0] + cpu->r[{n}], cpu->fr[{m}]);", False, None, False
+            return f"sh4_fmov_store(cpu, {m}, cpu->r[0] + cpu->r[{n}]);", False, None, False
 
         if (opcode & 0xF00F) == 0xF000:  # FADD
             return f"cpu->fr[{n}] += cpu->fr[{m}];", False, None, False
@@ -899,6 +899,43 @@ class SH4Recompiler:
         if (opcode & 0xF0FF) == 0xF00D:  # FSTS FPUL, FRn
             return f"{{ union {{ uint32_t u; float f; }} c; c.u = cpu->fpul; cpu->fr[{n}] = c.f; }}", False, None, False
 
+        # FLDI0/FLDI1 - the constants every bit of graphics code is built from
+        if (opcode & 0xF0FF) == 0xF08D:  # FLDI0 FRn
+            return f"cpu->fr[{n}] = 0.0f;", False, None, False
+        if (opcode & 0xF0FF) == 0xF09D:  # FLDI1 FRn
+            return f"cpu->fr[{n}] = 1.0f;", False, None, False
+
+        # FSRRA - reciprocal square root
+        if (opcode & 0xF0FF) == 0xF07D:
+            return (f"cpu->fr[{n}] = (cpu->fr[{n}] > 0.0f) "
+                    f"? 1.0f / sqrtf(cpu->fr[{n}]) : cpu->fr[{n}];"), False, None, False
+
+        # FRCHG and FSCHG share the 0xFnFD shape with FSCA and FTRV, so they
+        # have to be recognised first.
+        if opcode == 0xFBFD:
+            return "sh4_frchg(cpu);", False, None, False
+        if opcode == 0xF3FD:
+            return "cpu->fpscr ^= FPSCR_SZ; /* fschg */", False, None, False
+
+        # FSCA FPUL, DRn - sine and cosine of an angle, 65536 to the turn
+        if (opcode & 0xF1FF) == 0xF0FD:
+            base = n & 0xE
+            return (f"{{ float a = (float)(cpu->fpul & 0xFFFF) "
+                    f"* (2.0f * 3.14159265358979323846f / 65536.0f);\n"
+                    f"    cpu->fr[{base}] = sinf(a); cpu->fr[{base + 1}] = cosf(a); }} /* fsca */"), False, None, False
+
+        # FTRV XMTRX, FVn
+        if (opcode & 0xF3FF) == 0xF1FD:
+            b = n & 0xC
+            rows = []
+            for i in range(4):
+                terms = " + ".join(
+                    f"cpu->xf[{i + 4 * j}] * v[{j}]" for j in range(4))
+                rows.append(f"    cpu->fr[{b + i}] = {terms};")
+            body = "\n".join(rows)
+            return ("{ float v[4] = { cpu->fr[%d], cpu->fr[%d], cpu->fr[%d], cpu->fr[%d] };\n"
+                    "%s } /* ftrv */" % (b, b + 1, b + 2, b + 3, body)), False, None, False
+
         # FIPR (dot product)
         if (opcode & 0xF0FF) == 0xF0ED:
             vn = (n >> 2) & 3
@@ -914,14 +951,6 @@ class SH4Recompiler:
         # FMAC FR0, FRm, FRn
         if (opcode & 0xF00F) == 0xF00E:
             return f"cpu->fr[{n}] += cpu->fr[0] * cpu->fr[{m}];", False, None, False
-
-        # FRCHG
-        if opcode == 0xFBFD:
-            return "cpu->fpscr ^= FPSCR_FR; /* frchg */", False, None, False
-
-        # FSCHG
-        if opcode == 0xF3FD:
-            return "cpu->fpscr ^= FPSCR_SZ; /* fschg */", False, None, False
 
         # ---- ADDC/SUBC ----
         if (opcode & 0xF00F) == 0x300E:  # ADDC

@@ -334,6 +334,61 @@ bool sh4_stubbed_function(uint32_t addr, uint32_t *value) {
     return false;
 }
 
+/* The pair a register number names: even is this bank, odd is the other. */
+static float *fmov_pair(SH4CPU *cpu, int n) {
+    return (n & 1) ? &cpu->xf[n & 0xE] : &cpu->fr[n & 0xE];
+}
+
+void sh4_fmov_reg(SH4CPU *cpu, int n, int m) {
+    if (cpu->fpscr & FPSCR_SZ) {
+        float *d = fmov_pair(cpu, n), *s = fmov_pair(cpu, m);
+        d[0] = s[0];
+        d[1] = s[1];
+    } else {
+        cpu->fr[n] = cpu->fr[m];
+    }
+}
+
+void sh4_fmov_load(SH4CPU *cpu, int n, uint32_t addr) {
+    if (cpu->fpscr & FPSCR_SZ) {
+        float *d = fmov_pair(cpu, n);
+        d[0] = sh4_read_float(cpu, addr);
+        d[1] = sh4_read_float(cpu, addr + 4);
+    } else {
+        cpu->fr[n] = sh4_read_float(cpu, addr);
+    }
+}
+
+void sh4_fmov_store(SH4CPU *cpu, int m, uint32_t addr) {
+    if (cpu->fpscr & FPSCR_SZ) {
+        float *s = fmov_pair(cpu, m);
+        sh4_write_float(cpu, addr, s[0]);
+        sh4_write_float(cpu, addr + 4, s[1]);
+    } else {
+        sh4_write_float(cpu, addr, cpu->fr[m]);
+    }
+}
+
+void sh4_fmov_load_inc(SH4CPU *cpu, int n, int m) {
+    uint32_t addr = cpu->r[m];
+    sh4_fmov_load(cpu, n, addr);
+    cpu->r[m] += (cpu->fpscr & FPSCR_SZ) ? 8 : 4;
+}
+
+void sh4_fmov_store_dec(SH4CPU *cpu, int m, int n) {
+    cpu->r[n] -= (cpu->fpscr & FPSCR_SZ) ? 8 : 4;
+    sh4_fmov_store(cpu, m, cpu->r[n]);
+}
+
+void sh4_frchg(SH4CPU *cpu) {
+    for (int i = 0; i < 16; i++) {
+        float t = cpu->fr[i];
+        cpu->fr[i] = cpu->xf[i];
+        cpu->xf[i] = t;
+    }
+    cpu->fpscr ^= FPSCR_FR;
+}
+
 void sh4_aica_arm_released(void) {
     g_aica_arm_released_ms = platform_get_ticks_ms();
     if (!g_aica_arm_released_ms)
@@ -943,6 +998,24 @@ static int sq_log_count = 0;
 
 void sh4_sq_prefetch(SH4CPU *cpu, uint32_t addr) {
     if (addr < 0xE0000000 || addr > 0xE3FFFFFF) return;
+
+    /* A store queue burst goes wherever QACR says, and QACR is a register the
+     * game sets. Zero sends the whole burst to the bottom of area 0, which is
+     * nothing - and since the store queue is how a game feeds the tile
+     * accelerator, a game whose QACR is wrong renders nothing and looks like a
+     * dozen other faults. Say so once. */
+    { static unsigned long n = 0, lost = 0; static int said = 0;
+      uint32_t q = cpu->qacr[(addr >> 5) & 1];
+      uint32_t d = (((q >> 2) & 7) << 26) | (addr & 0x03FFFFE0);
+      n++;
+      if (d < 0x00100000) lost++;
+      if (!said && n >= 2000 && lost * 2 > n) {
+          said = 1;
+          printf("[SQ] %lu of %lu store queue bursts are going nowhere: QACR "
+                 "is 0x%X/0x%X, so the destination computes to 0x%08X. "
+                 "Geometry written to the store queue is being discarded.\n",
+                 lost, n, cpu->qacr[0], cpu->qacr[1], d);
+      } }
 
     if (sq_log_count < 5) {
         sq_log_count++;

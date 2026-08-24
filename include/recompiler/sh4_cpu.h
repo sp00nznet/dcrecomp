@@ -186,6 +186,23 @@ bool sh4_stubbed_function(uint32_t addr, uint32_t *value);
  * implementation. */
 void sh4_aica_arm_released(void);
 
+/* FMOV, honouring FPSCR.SZ and the XD encoding.
+ *
+ * With SZ clear these move one float. With SZ set they move a pair, and an odd
+ * register number names that pair in the *other* bank - which is how a game
+ * loads XMTRX. SZ is a runtime bit, so the decision lives here rather than at
+ * every call site. */
+void sh4_fmov_reg(SH4CPU *cpu, int n, int m);
+void sh4_fmov_load(SH4CPU *cpu, int n, uint32_t addr);
+void sh4_fmov_store(SH4CPU *cpu, int m, uint32_t addr);
+void sh4_fmov_load_inc(SH4CPU *cpu, int n, int m);
+void sh4_fmov_store_dec(SH4CPU *cpu, int m, int n);
+
+/* Swap the two float banks. FRCHG changes which one the FR names mean; doing
+ * it as a real swap keeps "current bank" always fr[] and leaves xf[] as
+ * XMTRX, which is what FTRV wants. */
+void sh4_frchg(SH4CPU *cpu);
+
 /* Account for time a device took that we did not. A GD-ROM needs about a
  * second for a megabyte and a half; the game gets sixty frames in that time,
  * and its per-frame housekeeping runs in them. Whole frames of the credit are

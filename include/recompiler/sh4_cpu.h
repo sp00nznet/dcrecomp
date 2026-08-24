@@ -203,6 +203,10 @@ void sh4_fmov_store_dec(SH4CPU *cpu, int m, int n);
  * XMTRX, which is what FTRV wants. */
 void sh4_frchg(SH4CPU *cpu);
 
+/* One step of restoring division: DIV1 Rm,Rn. The SH-4 has no divide
+ * instruction - DIV0S or DIV0U sets up, then thirty-two of these. */
+void sh4_div1(SH4CPU *cpu, int n, int m);
+
 /* Account for time a device took that we did not. A GD-ROM needs about a
  * second for a megabyte and a half; the game gets sixty frames in that time,
  * and its per-frame housekeeping runs in them. Whole frames of the credit are
@@ -250,6 +254,9 @@ void sh4_poll_irq(SH4CPU *cpu);
  * this is the SH-4 call chain - unlike cpu->pr, which only moves on
  * indirect branches. Needs debug info to resolve names. */
 void sh4_dump_native_stack(const char *tag);
+
+/* Print the native call chain on a crash instead of dying silently. */
+void sh4_install_crash_handler(void);
 
 /* SR T-bit helpers */
 static inline bool sh4_get_t(SH4CPU *cpu) { return (cpu->sr & SR_T) != 0; }

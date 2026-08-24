@@ -952,6 +952,37 @@ class SH4Recompiler:
         if (opcode & 0xF00F) == 0xF00E:
             return f"cpu->fr[{n}] += cpu->fr[0] * cpu->fr[{m}];", False, None, False
 
+        # ---- Division ----
+        # The SH-4 divides by stepping: DIV0S or DIV0U to set up, then one DIV1
+        # per result bit. Without these the compiler's __udivsi3 hands back the
+        # numerator and every division in the binary is quietly wrong.
+        if opcode == 0x0019:  # DIV0U
+            return ("cpu->sr &= ~(SR_Q | SR_M | SR_T); /* div0u */",
+                    False, None, False)
+        if (opcode & 0xF00F) == 0x2007:  # DIV0S Rm,Rn
+            return (f"{{ unsigned q = (cpu->r[{n}] >> 31) & 1, mm = (cpu->r[{m}] >> 31) & 1;\n"
+                    f"    cpu->sr = (cpu->sr & ~(SR_Q | SR_M | SR_T))\n"
+                    f"              | (q ? SR_Q : 0) | (mm ? SR_M : 0)\n"
+                    f"              | ((q ^ mm) ? SR_T : 0); }} /* div0s */",
+                    False, None, False)
+        if (opcode & 0xF00F) == 0x3004:  # DIV1 Rm,Rn
+            return f"sh4_div1(cpu, {n}, {m});", False, None, False
+
+        # ---- SR flag bits ----
+        if opcode == 0x0048:  # CLRS
+            return "cpu->sr &= ~SR_S;", False, None, False
+        if opcode == 0x0058:  # SETS
+            return "cpu->sr |= SR_S;", False, None, False
+        if opcode == 0x001B:  # SLEEP
+            return "/* sleep: nothing to wait for here */", False, None, False
+
+        # ---- TAS.B ----
+        if (opcode & 0xF0FF) == 0x401B:
+            return (f"{{ uint8_t v = sh4_read8(cpu, cpu->r[{n}]);\n"
+                    f"    sh4_set_t(cpu, v == 0);\n"
+                    f"    sh4_write8(cpu, cpu->r[{n}], (uint8_t)(v | 0x80)); }} /* tas.b */",
+                    False, None, False)
+
         # ---- ADDC/SUBC ----
         if (opcode & 0xF00F) == 0x300E:  # ADDC
             return (f"{{ uint32_t tmp = cpu->r[{n}]; uint32_t t = sh4_get_t(cpu) ? 1 : 0;\n"
@@ -1362,11 +1393,29 @@ class SH4Recompiler:
 
             f.write("#include <stdio.h>\n")
             f.write("static int unresolved_log = 0;\n\n")
+            f.write("/* Recent indirect-call targets. Two stores per call, and the only\n")
+            f.write(" * thing that says anything when a crash has damaged the native stack -\n")
+            f.write(" * which MSVC's tail calls flatten even when it is intact. */\n")
+            f.write("static uint32_t g_trace_pc[256], g_trace_pr[256];\n")
+            f.write("static unsigned g_trace_n = 0;\n\n")
+            f.write("void dcrecomp_dump_calltrace(int count) {\n")
+            f.write("    unsigned total = g_trace_n < 256 ? g_trace_n : 256;\n")
+            f.write("    if ((unsigned)count > total) count = (int)total;\n")
+            f.write("    printf(\"[TRACE] last %d indirect calls, oldest first:\\n\", count);\n")
+            f.write("    for (int i = count - 1; i >= 0; i--) {\n")
+            f.write("        unsigned idx = (g_trace_n - 1 - (unsigned)i) & 255;\n")
+            f.write("        printf(\"   %08X  (from %08X)\\n\", g_trace_pc[idx], g_trace_pr[idx]);\n")
+            f.write("    }\n")
+            f.write("    fflush(stdout);\n")
+            f.write("}\n\n")
             f.write("void sh4_call_indirect(SH4CPU *cpu) {\n")
             f.write("    /* Normalize: strip P1/P2/P3 area bits to P1 cached form */\n")
             f.write("    uint32_t phys = cpu->pc & 0x1FFFFFFF;\n")
             f.write("    /* A call through the BIOS vector table is a syscall, not\n")
             f.write("     * a function in this binary. */\n")
+            f.write("    g_trace_pc[g_trace_n & 255] = cpu->pc;\n")
+            f.write("    g_trace_pr[g_trace_n & 255] = cpu->pr;\n")
+            f.write("    g_trace_n++;\n")
             f.write("    if (sh4_bios_syscall(cpu)) return;\n")
             f.write("    /* Subsystems the game declared as not runnable here.\n")
             f.write("     * See sh4_stub_function. */\n")

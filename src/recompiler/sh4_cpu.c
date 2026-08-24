@@ -23,6 +23,60 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <dbghelp.h>
+static SH4CPU *g_cpu_ref;
+
+static LONG WINAPI sh4_crash_filter(EXCEPTION_POINTERS *info) {
+    printf("[CRASH] exception 0x%08lX at 0x%p\n",
+           (unsigned long)info->ExceptionRecord->ExceptionCode,
+           info->ExceptionRecord->ExceptionAddress);
+    if (info->ExceptionRecord->NumberParameters >= 2)
+        printf("[CRASH] accessing 0x%p\n",
+               (void *)info->ExceptionRecord->ExceptionInformation[1]);
+    if (g_cpu_ref)
+        printf("[CRASH] sh4 pc=0x%08X pr=0x%08X sp=0x%08X sr=0x%08X\n",
+               g_cpu_ref->pc, g_cpu_ref->pr, g_cpu_ref->r[15], g_cpu_ref->sr);
+    fflush(stdout);
+    { /* Walk from the faulting context. */
+      CONTEXT ctx = *info->ContextRecord;
+      STACKFRAME64 f; memset(&f, 0, sizeof f);
+      HANDLE proc = GetCurrentProcess(), thr = GetCurrentThread();
+      char nbuf[sizeof(SYMBOL_INFO) + 256];
+      SYMBOL_INFO *sym = (SYMBOL_INFO *)nbuf;
+      SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME);
+      SymInitialize(proc, NULL, TRUE);
+      sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+      sym->MaxNameLen = 255;
+      f.AddrPC.Offset = ctx.Rip;    f.AddrPC.Mode = AddrModeFlat;
+      f.AddrFrame.Offset = ctx.Rbp; f.AddrFrame.Mode = AddrModeFlat;
+      f.AddrStack.Offset = ctx.Rsp; f.AddrStack.Mode = AddrModeFlat;
+      printf("[CRASH] rip=0x%llX rsp=0x%llX rbp=0x%llX\n",
+             (unsigned long long)ctx.Rip, (unsigned long long)ctx.Rsp,
+             (unsigned long long)ctx.Rbp);
+      printf("[CRASH] stack:");
+      for (int i = 0; i < 32; i++) {
+          if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, proc, thr, &f, &ctx,
+                           NULL, SymFunctionTableAccess64, SymGetModuleBase64,
+                           NULL))
+              break;
+          if (!f.AddrPC.Offset) break;
+          DWORD64 disp = 0;
+          if (SymFromAddr(proc, f.AddrPC.Offset, &disp, sym))
+              printf(" %s", sym->Name);
+          else
+              printf(" 0x%llX", (unsigned long long)f.AddrPC.Offset);
+      }
+      printf("\n"); }
+    sh4_dump_native_stack("crash");
+    { void dcrecomp_dump_calltrace(int);
+      dcrecomp_dump_calltrace(24); }
+    fflush(stdout);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+void sh4_install_crash_handler(void) {
+    SetUnhandledExceptionFilter(sh4_crash_filter);
+}
+
 void sh4_dump_native_stack(const char *tag) {
     void *frames[40];
     USHORT n = CaptureStackBackTrace(0, 40, frames, NULL);
@@ -64,6 +118,17 @@ static uint32_t g_watch_addr2 = 0;
 static int g_watch_init = 0;
 
 static void watch_check(uint32_t addr, uint32_t val) {
+    { static int rl = -2; static uint32_t lo, hi;
+      if (rl == -2) { const char *e = getenv("DCRECOMP_WATCHRANGE");
+          if (e) { lo = (uint32_t)strtoul(e, NULL, 0); hi = lo + 0x20; rl = 1; }
+          else rl = 0; }
+      if (rl == 1) { uint32_t a = addr & 0x1FFFFFFF;
+          if (val && a >= (lo & 0x1FFFFFFF) && a < (hi & 0x1FFFFFFF)) {
+              static int n = 0;
+              if (++n < 24) {
+                  printf("[RANGE] 0x%08X = 0x%08X\n", addr, val);
+                  sh4_dump_native_stack("range");
+              } } } }
     if (!g_watch_init) {
         const char *e = getenv("DCRECOMP_WATCH");
         g_watch_addr = e ? (uint32_t)strtoul(e, NULL, 0) : 0;
@@ -380,6 +445,37 @@ void sh4_fmov_store_dec(SH4CPU *cpu, int m, int n) {
     sh4_fmov_store(cpu, m, cpu->r[n]);
 }
 
+/* DIV1 Rm,Rn, straight out of the SH-4 manual. Q and M live in SR; each step
+ * shifts the dividend left through T, then adds or subtracts the divisor
+ * depending on the previous Q and on M, and recomputes Q from whether that
+ * carried. T ends up as (Q == M), which is what the next step shifts in. */
+void sh4_div1(SH4CPU *cpu, int n, int m) {
+    uint32_t divisor = cpu->r[m];
+    unsigned old_q = (cpu->sr & SR_Q) ? 1u : 0u;
+    unsigned mbit  = (cpu->sr & SR_M) ? 1u : 0u;
+    unsigned q     = (cpu->r[n] & 0x80000000u) ? 1u : 0u;
+    unsigned carry;
+    uint32_t before;
+
+    cpu->r[n] = (cpu->r[n] << 1) | ((cpu->sr & SR_T) ? 1u : 0u);
+
+    before = cpu->r[n];
+    if (old_q == mbit) {
+        cpu->r[n] -= divisor;
+        carry = (cpu->r[n] > before) ? 1u : 0u;
+    } else {
+        cpu->r[n] += divisor;
+        carry = (cpu->r[n] < before) ? 1u : 0u;
+    }
+
+    /* The manual writes the new Q as four cases on (old_q, M, Q). Written out,
+     * the dependence on old_q cancels and what is left is Q ^ carry ^ M. */
+    q = q ^ carry ^ mbit;
+
+    if (q) cpu->sr |= SR_Q; else cpu->sr &= ~SR_Q;
+    if (q == mbit) cpu->sr |= SR_T; else cpu->sr &= ~SR_T;
+}
+
 void sh4_frchg(SH4CPU *cpu) {
     for (int i = 0; i < 16; i++) {
         float t = cpu->fr[i];
@@ -425,6 +521,7 @@ uint32_t sh4_get_dmac_reg(int idx) {
 }
 
 void sh4_init_ex(SH4CPU *cpu, uint32_t ram_size) {
+    sh4_install_crash_handler();
     memset(cpu, 0, sizeof(SH4CPU));
 
     /* Set RAM size and mask */

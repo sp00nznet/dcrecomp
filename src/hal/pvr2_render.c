@@ -293,6 +293,13 @@ void pvr2_render_frame(void) {
     glUniform2f(g_uniform_screen_size, (float)g_width, (float)g_height);
 
     glBindVertexArray(g_vao);
+    /* Bind our own buffer before uploading into it. A vertex array object
+     * remembers which buffer each attribute came from, but GL_ARRAY_BUFFER
+     * itself is global state - and the framebuffer present binds its own quad
+     * buffer there. Without this, the geometry upload lands in that quad, the
+     * draw reads attributes from a buffer that still holds twelve floats, and
+     * the driver walks off the end of it. */
+    glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
 
     /* Draw lists in order: opaque → punch-through → translucent */
     int draw_order[] = {

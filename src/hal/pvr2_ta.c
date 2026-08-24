@@ -438,7 +438,8 @@ void pvr2_ta_reset(void) {
                  g_ta.packets_received, g_ta.total_vertices, g_ta.total_polygons);
       } }
     /* Log stats for first 3 frames */
-    if (g_ta.log_countdown > 57) {
+    static unsigned frame_no = 0;
+    if (g_ta.log_countdown > 57 || (++frame_no % 150) == 0) {
         printf("[PVR2] TA frame stats: %d pkts, %d verts, %d polys, %d strips\n",
                g_ta.packets_received, g_ta.total_vertices,
                g_ta.total_polygons, g_ta.total_strips);

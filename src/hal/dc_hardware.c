@@ -401,7 +401,8 @@ void dc_hw_write32(DCHardware *hw, uint32_t addr, uint32_t val) {
                    hw->frame_count, pkts, verts, polys);
         }
         /* Render submitted geometry via OpenGL */
-        pvr2_render_frame();
+        { static int skip = -1; if (skip < 0) skip = getenv("DCRECOMP_NO_RENDER") ? 1 : 0;
+          if (!skip) pvr2_render_frame(); }
         platform_swap_buffers();
         pvr2_ta_reset();
         /* Poll input events to keep window responsive */
@@ -716,7 +717,9 @@ void dc_pvr_wait_vblank(DCHardware *hw) {
      * the tile accelerator or by writing it directly, and until it reaches its
      * render loop only the latter has happened - so presenting here is what
      * makes early frames visible at all. */
-    if (pvr2_present_framebuffer(hw->pvr_fb_addr1,
+    static int nopresent = -1;
+    if (nopresent < 0) nopresent = getenv("DCRECOMP_NO_PRESENT") ? 1 : 0;
+    if (!nopresent && pvr2_present_framebuffer(hw->pvr_fb_addr1,
                                  hw->hw_regs[hw_reg_idx(PVR_FB_R_CTRL)],
                                  DC_SCREEN_W, DC_SCREEN_H) > 0)
         platform_swap_buffers();

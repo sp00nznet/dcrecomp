@@ -180,6 +180,16 @@ void dc_hw_raise_istnrm(int bit);
 /* Pending SB_ISTNRM bits, without counting as a read of the register. */
 uint32_t dc_hw_get_istnrm(DCHardware *hw);
 
+/* Pending SB_ISTEXT bits. */
+uint32_t dc_hw_get_istext(DCHardware *hw);
+
+/* Finish any G2 transfer whose time is up. Safe to call often. */
+void dc_g2_retire_finished(DCHardware *hw);
+
+/* The AICA's register block at 0x00700000, offset-relative. */
+uint32_t dc_aica_reg_read(uint32_t off);
+void dc_aica_reg_write(uint32_t off, uint32_t val);
+
 void dc_pvr_wait_vblank(DCHardware *hw);
 
 /* Controller operations */

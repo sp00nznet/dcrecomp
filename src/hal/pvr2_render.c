@@ -266,6 +266,13 @@ int pvr2_present_framebuffer(uint32_t fb_addr, uint32_t fb_ctrl, int width, int 
                base, fmt, width, height, nonzero);
     }
 
+    /* Nothing in the framebuffer. Draw it anyway and we paint black over the
+     * frame the tile accelerator just rendered - two presenters, one window,
+     * and the empty one wins because it runs last. Leave the rendered frame
+     * where it is; the caller skips its swap on a zero return. */
+    if (!nonzero)
+        return 0;
+
     glBindTexture(GL_TEXTURE_2D, g_fb_tex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0,
                  GL_RGBA, GL_UNSIGNED_BYTE, g_fb_pixels);

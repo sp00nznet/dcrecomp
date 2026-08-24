@@ -126,6 +126,8 @@ uint32_t dc_hw_read32(DCHardware *hw, uint32_t addr) {
         poll_count = 1;
     }
 
+    dc_g2_retire_finished(hw);
+
     switch (phys) {
     case PVR_ID:
         return 0x17FD11DB;
@@ -256,6 +258,48 @@ static uint8_t *dma_resolve(uint32_t addr, uint32_t *len, const char **what) {
     return NULL;
 }
 
+/* A G2 channel that has copied its data but is not admitting to being done
+ * yet. The wait is the point: a driver starts a channel and then records the
+ * transfer, and clearing the start bit before it gets that far means the
+ * transfer is never in its list to complete. 4MB/s is about what G2 sustains,
+ * and a millisecond floor covers the small transfers. */
+#define G2_BYTES_PER_MS 4096
+static struct {
+    uint32_t base;
+    int      bit;
+    uint64_t done_ms;
+    int      busy;
+} g_g2_busy[5];
+
+static void g2_start_busy(uint32_t base, int bit, uint32_t len) {
+    uint64_t ms = len / G2_BYTES_PER_MS;
+    if (ms < 1) ms = 1;
+    for (int i = 0; i < 5; i++) {
+        if (g_g2_busy[i].busy && g_g2_busy[i].base != base)
+            continue;
+        g_g2_busy[i].base = base;
+        g_g2_busy[i].bit = bit;
+        g_g2_busy[i].done_ms = platform_get_ticks_ms() + ms;
+        g_g2_busy[i].busy = 1;
+        return;
+    }
+}
+
+/* Called from the register read and from the interrupt poll: retire any
+ * channel whose time is up, clear its start bit and raise its interrupt. */
+void dc_g2_retire_finished(DCHardware *hw) {
+    if (!hw) return;
+    uint64_t now = platform_get_ticks_ms();
+    for (int i = 0; i < 5; i++) {
+        if (!g_g2_busy[i].busy || now < g_g2_busy[i].done_ms)
+            continue;
+        g_g2_busy[i].busy = 0;
+        hw->hw_regs[hw_reg_idx(g_g2_busy[i].base + DMA_OFF_START)] = 0;
+        hw->hw_regs[hw_reg_idx(g_g2_busy[i].base + DMA_OFF_LEN)] = 0;
+        hw->sb_istnrm |= (1u << g_g2_busy[i].bit);
+    }
+}
+
 static void run_dma(DCHardware *hw, uint32_t base, int istnrm_bit,
                     const char *name) {
     uint32_t device = hw->hw_regs[hw_reg_idx(base + DMA_OFF_DEVICE)];
@@ -305,10 +349,9 @@ static void run_dma(DCHardware *hw, uint32_t base, int istnrm_bit,
         }
     }
 
-    /* Clear the start bit and length: this is what the game is waiting on. */
-    hw->hw_regs[hw_reg_idx(base + DMA_OFF_START)] = 0;
-    hw->hw_regs[hw_reg_idx(base + DMA_OFF_LEN)] = 0;
-    hw->sb_istnrm |= (1u << istnrm_bit);
+    /* The data has moved, but the channel is still busy as far as the game
+     * is concerned - see the note on g2_busy. */
+    g2_start_busy(base, istnrm_bit, len);
 }
 
 static int hw_write_log = 0;
@@ -364,7 +407,13 @@ void dc_hw_write32(DCHardware *hw, uint32_t addr, uint32_t val) {
         /* Poll input events to keep window responsive */
         platform_poll_events(hw);
         /* Signal render complete via interrupt */
-        hw->sb_istnrm |= (1 << 2); /* Render complete */
+        { static unsigned frames = 0; static uint64_t t0 = 0;
+          uint64_t now = platform_get_ticks_ms();
+          if (!t0) t0 = now;
+          if (++frames % 60 == 0)
+              printf("[FRAME] %u rendered, %.1f fps\n", frames,
+                     frames * 1000.0 / (double)(now - t0 + 1)); }
+        hw->sb_istnrm |= (1 << 0) | (1 << 1) | (1 << 2); /* render done: video, isp, tsp */
         hw->pvr_rendering = false;
         break;
 
@@ -404,10 +453,10 @@ void dc_hw_write32(DCHardware *hw, uint32_t addr, uint32_t val) {
         break;
 
     /* G2 channels: AICA, Ext1, Ext2, Dev - and the PVR channel. */
-    case 0x005F7818: if (val & 1) run_dma(hw, 0x005F7800, 14, "AICA"); return;
-    case 0x005F7838: if (val & 1) run_dma(hw, 0x005F7820, 15, "EXT1"); return;
-    case 0x005F7858: if (val & 1) run_dma(hw, 0x005F7840, 16, "EXT2"); return;
-    case 0x005F7878: if (val & 1) run_dma(hw, 0x005F7860, 17, "DEV");  return;
+    case 0x005F7818: if (val & 1) run_dma(hw, 0x005F7800, 15, "AICA"); return;
+    case 0x005F7838: if (val & 1) run_dma(hw, 0x005F7820, 16, "EXT1"); return;
+    case 0x005F7858: if (val & 1) run_dma(hw, 0x005F7840, 17, "EXT2"); return;
+    case 0x005F7878: if (val & 1) run_dma(hw, 0x005F7860, 18, "DEV");  return;
 
     case SB_C2DST:
         if (val & 1) {
@@ -513,7 +562,7 @@ void dc_hw_write32(DCHardware *hw, uint32_t addr, uint32_t val) {
                            packets, sd_len);
                 }
             }
-            hw->sb_istnrm |= (1 << 13); /* Sort-DMA complete interrupt */
+            hw->sb_istnrm |= (1 << 20); /* Sort-DMA complete */
             hw->hw_regs[hw_reg_idx(SB_SDST)] = 0;
         }
         break;
@@ -553,7 +602,7 @@ void dc_hw_write32(DCHardware *hw, uint32_t addr, uint32_t val) {
                 }
             }
             /* Signal DMA complete */
-            hw->sb_istnrm |= (1 << 19); /* PVR DMA complete interrupt */
+            hw->sb_istnrm |= (1 << 11); /* PVR-DMA complete */
             hw->hw_regs[hw_reg_idx(SB_PDST)] = 0; /* Clear start bit */
         }
         break;
@@ -616,8 +665,42 @@ void dc_pvr_end_list(DCHardware *hw) {
     /* TODO: End polygon list */
 }
 
+/* ---- AICA registers ----------------------------------------------------
+ *
+ * 0x00700000-0x00707FFF. Mostly channel state the ARM7 owns; the one that
+ * matters to us is 0x00702C00, whose bit 0 holds that processor in reset. */
+#define AICA_REG_SIZE   0x8000
+#define AICA_ARM_RESET  0x2C00
+
+static uint32_t g_aica_regs[AICA_REG_SIZE / 4];
+
+uint32_t dc_aica_reg_read(uint32_t off) {
+    return g_aica_regs[(off & (AICA_REG_SIZE - 1)) / 4];
+}
+
+void dc_aica_reg_write(uint32_t off, uint32_t val) {
+    off &= AICA_REG_SIZE - 1;
+    uint32_t prev = g_aica_regs[off / 4];
+    g_aica_regs[off / 4] = val;
+
+    if (off == AICA_ARM_RESET && (prev & 1) && !(val & 1)) {
+        /* Released. On hardware the driver boots, works through the commands
+         * the game left in sound RAM and interrupts the SH-4 to report them
+         * done. Report for it - the game's handler is what moves its own state
+         * machine on, and without this it sits waiting on a processor that is
+         * never going to answer. */
+        printf("[AICA] sound processor released from reset - "
+               "answering for the driver (stub)\n");
+        sh4_aica_arm_released();
+    }
+}
+
 uint32_t dc_hw_get_istnrm(DCHardware *hw) {
     return hw ? hw->sb_istnrm : 0;
+}
+
+uint32_t dc_hw_get_istext(DCHardware *hw) {
+    return hw ? hw->sb_istext : 0;
 }
 
 void dc_hw_raise_istnrm(int bit) {
@@ -633,10 +716,10 @@ void dc_pvr_wait_vblank(DCHardware *hw) {
      * the tile accelerator or by writing it directly, and until it reaches its
      * render loop only the latter has happened - so presenting here is what
      * makes early frames visible at all. */
-    pvr2_present_framebuffer(hw->pvr_fb_addr1,
-                             hw->hw_regs[hw_reg_idx(PVR_FB_R_CTRL)],
-                             DC_SCREEN_W, DC_SCREEN_H);
-    platform_swap_buffers();
+    if (pvr2_present_framebuffer(hw->pvr_fb_addr1,
+                                 hw->hw_regs[hw_reg_idx(PVR_FB_R_CTRL)],
+                                 DC_SCREEN_W, DC_SCREEN_H) > 0)
+        platform_swap_buffers();
     platform_poll_events(hw);
     /* Set VBLANK interrupt */
     hw->sb_istnrm |= (1 << 3); /* VBlank-IN */

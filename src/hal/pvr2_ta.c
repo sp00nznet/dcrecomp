@@ -429,6 +429,14 @@ void pvr2_ta_write(const uint32_t *data) {
 }
 
 void pvr2_ta_reset(void) {
+    /* Report the first frame that actually carries geometry: the interesting
+     * moment is when a game stops submitting empty lists. */
+    { static int announced = 0;
+      if (!announced && g_ta.total_vertices > 0) {
+          announced = 1;
+          printf("[PVR2] first frame with geometry: %d pkts, %d verts, %d polys\n",
+                 g_ta.packets_received, g_ta.total_vertices, g_ta.total_polygons);
+      } }
     /* Log stats for first 3 frames */
     if (g_ta.log_countdown > 57) {
         printf("[PVR2] TA frame stats: %d pkts, %d verts, %d polys, %d strips\n",

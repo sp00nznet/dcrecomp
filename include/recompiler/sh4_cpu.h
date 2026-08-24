@@ -164,7 +164,35 @@ uint8_t *sh4_get_aica_ram_ptr(void);
  * gets past its sound init and no sound comes out. Which word and which
  * value belong to the driver, so the game declares them, not the hardware
  * model. DCRECOMP_AICAPOLL names any word a game is stuck reading. */
-void sh4_aica_publish(uint32_t offset, uint32_t value);
+void sh4_aica_publish(uint32_t offset, uint32_t value, uint32_t after_ms);
+
+/* Answer a call to `addr` with `r0 = value` instead of running it.
+ *
+ * For subsystems that cannot work because the hardware under them is not
+ * modelled - the sound driver on the AICA's ARM7 being the one that matters
+ * today. A game declares these in its own bring-up file so they survive
+ * regeneration and are visible to anyone reading it.
+ *
+ * Reaches only calls that go through the dispatcher: jsr or jmp through a
+ * register. A bsr is a direct call in the generated C, so choose an address
+ * the game arrives at indirectly. */
+void sh4_stub_function(uint32_t addr, uint32_t value);
+
+/* True if `addr` is stubbed; fills in the value. Used by the dispatcher. */
+bool sh4_stubbed_function(uint32_t addr, uint32_t *value);
+
+/* The sound processor has been released from reset. Published words start
+ * answering shortly afterwards - the delay is the point, see the note by the
+ * implementation. */
+void sh4_aica_arm_released(void);
+
+/* Account for time a device took that we did not. A GD-ROM needs about a
+ * second for a megabyte and a half; the game gets sixty frames in that time,
+ * and its per-frame housekeeping runs in them. Whole frames of the credit are
+ * delivered as VBlanks from the next poll onward, one per poll, so they
+ * interleave with the game's code the way they would have. */
+void sh4_credit_elapsed_ms(uint32_t ms);
+
 uint32_t sh4_get_ram_size(void);
 uint32_t sh4_get_ram_mask(void);
 

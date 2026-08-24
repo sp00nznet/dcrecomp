@@ -158,6 +158,11 @@ static int syscall_romfont(SH4CPU *cpu) {
 #define GDC_RAW_SECTOR    2352
 #define GDC_DATA_OFFSET   16      /* MODE1: sync + header before user data */
 
+/* Sectors served since we last charged for them. A drive reads about 900 a
+ * second. */
+static unsigned gdc_sectors_read = 0;
+#define GDC_SECTORS_PER_SECOND 900
+
 #define GDC_MAX_TRACKS 24
 
 static struct {
@@ -201,6 +206,7 @@ static int gdc_read_sectors(SH4CPU *cpu, uint32_t lba, uint32_t count, uint32_t 
     static uint8_t sector[GDC_RAW_SECTOR];
     for (uint32_t i = 0; i < count; i++) {
         memset(sector, 0, sizeof sector);
+        gdc_sectors_read++;
         uint32_t want = lba + i;
         for (int t = 0; t < g_track_count; t++) {
             if (want < g_tracks[t].start_lba ||
@@ -242,13 +248,18 @@ static int gdc_exec(SH4CPU *cpu, uint32_t cmd, uint32_t param) {
         uint32_t dest  = sh4_read32(cpu, param + 8);
         { static unsigned long n = 0, sectors = 0;
           n++; sectors += count;
-          if ((n % 20000) == 0)
+          if ((n % 200) == 0)
               printf("[BIOS] gdrom: %lu reads, %lu sectors (%lu KB)\n", n, sectors, sectors * 2); }
         if (logged < 8) {
             logged++;
             printf("[BIOS] gdrom read: lba %u x%u -> 0x%08X\n", lba, count, dest);
         }
-        return gdc_read_sectors(cpu, lba, count, dest);
+        int r = gdc_read_sectors(cpu, lba, count, dest);
+        if (gdc_sectors_read) {
+            sh4_credit_elapsed_ms(gdc_sectors_read * 1000u / GDC_SECTORS_PER_SECOND);
+            gdc_sectors_read = 0;
+        }
+        return r;
     }
     case GDC_CMD_INIT:
         return 0;

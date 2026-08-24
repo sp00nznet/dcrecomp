@@ -55,6 +55,10 @@ void sh4_dump_native_stack(const char *tag) { (void)tag; }
  * every 32-bit write to it prints the value and the recompiled call chain.
  * Answers "which code sets this flag", which grep cannot when the address is
  * register-relative in the generated C. */
+static SH4CPU *g_cpu_ref;
+static uint64_t g_irq_delivered;
+static uint64_t g_irq_masked;
+static unsigned g_irq_repeats;
 static uint32_t g_watch_addr = 0;
 static uint32_t g_watch_addr2 = 0;
 static int g_watch_init = 0;
@@ -73,7 +77,7 @@ static void watch_check(uint32_t addr, uint32_t val) {
         static unsigned long n = 0;
         n++;
         if (n <= 60 || (n % 5000) == 0) {
-            printf("[WATCH] write 0x%08X = 0x%08X\n", addr, val);
+            printf("[WATCH] t=%llu irq=%llu masked=%llu sr=%08X write 0x%08X = 0x%08X\n", (unsigned long long)platform_get_ticks_ms(), (unsigned long long)g_irq_delivered, (unsigned long long)g_irq_masked, g_cpu_ref ? g_cpu_ref->sr : 0, addr, val);
             sh4_dump_native_stack("watch");
         }
     }
@@ -112,6 +116,7 @@ static bool g_in_irq = false;
 static uint64_t g_irq_delivered = 0;
 static uint64_t g_irq_reentrant = 0;   /* skipped because a handler was running */
 static uint64_t g_irq_masked = 0;      /* skipped because SR.BL or SR.IMASK blocked it */
+static unsigned g_irq_repeats = 0;     /* deliveries since the pending set last emptied */
 
 
 void sh4_set_irq_handler(void (*handler)(SH4CPU *cpu)) {
@@ -134,6 +139,15 @@ static int vblank_irl_level(void) {
     if (pend & dc_hw_read32(g_hardware, SB_IML6NRM)) return 13;
     if (pend & dc_hw_read32(g_hardware, SB_IML4NRM)) return 11;
     if (pend & dc_hw_read32(g_hardware, SB_IML2NRM)) return 9;
+
+    /* External sources - GD-ROM, AICA, modem - have their own status and mask
+     * registers and are just as able to be what a game is waiting on. */
+    { uint32_t ext = dc_hw_get_istext(g_hardware);
+      if (ext) {
+          if (ext & dc_hw_read32(g_hardware, SB_IML6EXT)) return 13;
+          if (ext & dc_hw_read32(g_hardware, SB_IML4EXT)) return 11;
+          if (ext & dc_hw_read32(g_hardware, SB_IML2EXT)) return 9;
+      } }
     if (!(pend & VBL_IN))
         return 0;
     /* Holly's three interrupt levels are wired to SH-4 IRL 13, 11 and 9 - not
@@ -155,6 +169,21 @@ static int vblank_irl_level(void) {
     return 11;
 }
 
+/* Frames the game is owed for time a device spent that we did not, and the
+ * remainder that has not yet added up to one. */
+static unsigned g_owed_vblanks = 0;
+static uint32_t g_owed_ms = 0;
+
+void sh4_credit_elapsed_ms(uint32_t ms) {
+    g_owed_ms += ms;
+    g_owed_vblanks += g_owed_ms / 16;
+    g_owed_ms %= 16;
+    /* A second's worth is more than any single wait needs, and capping keeps a
+     * bad length from parking us in the poll loop. */
+    if (g_owed_vblanks > 60)
+        g_owed_vblanks = 60;
+}
+
 void sh4_poll_irq(SH4CPU *cpu) {
     if (!g_hardware) return;
     /* ponytail: no nested interrupts. Hardware allows a handler that lowers
@@ -163,32 +192,58 @@ void sh4_poll_irq(SH4CPU *cpu) {
      * interrupt, this guard is what deadlocks and this is where to fix it. */
     if (g_in_irq) { g_irq_reentrant++; return; }
 
-    uint64_t now = platform_get_ticks_ms();
-    if (g_last_vblank_ms == 0) g_last_vblank_ms = now;
-    if (now - g_last_vblank_ms >= 16) {        /* ~60Hz */
-        g_last_vblank_ms = now;
-        dc_pvr_wait_vblank(g_hardware);        /* raises SB_ISTNRM VBlank-IN */
-    }
-    if (!g_irq_handler) return;
+    /* Raising is on the clock; delivering is not. With nothing pending the
+     * only question is whether 16ms have passed, and asking costs a clock read
+     * - so ask at the old rate. With something pending the question is whether
+     * the game has unmasked, which needs no clock and wants asking every time:
+     * a game masks and unmasks around every list it shares with its handler,
+     * so it is unmasked for only a small part of the time and a coarse check
+     * lands inside a critical section almost every time. */
+    /* Raising VBlank is on the clock, and the clock is the expensive part, so
+     * ask at the old rate. It has to be asked unconditionally: we raise bits a
+     * game may never route or clear - a DMA completion it does not use, say -
+     * and gating the clock on "nothing pending" would let one of those stop
+     * VBlank for good. */
+    dc_g2_retire_finished(g_hardware);
 
-    /* One delivery per millisecond at most. The handler clears what it
-     * services, so this only bites when a bit is set that nothing handles -
-     * and then it costs a delivery per millisecond rather than a spin. */
-    static uint64_t last_deliver_ms = 0;
-    if (now == last_deliver_ms) return;
+    { static unsigned tick = 0;
+      if ((++tick & 0x1F) == 0) {
+          uint64_t now = platform_get_ticks_ms();
+          if (g_last_vblank_ms == 0) g_last_vblank_ms = now;
+          if (now - g_last_vblank_ms >= 16) {  /* ~60Hz */
+              g_last_vblank_ms = now;
+              dc_pvr_wait_vblank(g_hardware);  /* raises SB_ISTNRM VBlank-IN */
+          } else if (g_owed_vblanks) {
+              g_owed_vblanks--;
+              dc_pvr_wait_vblank(g_hardware);
+          }
+      } }
+    if (!g_irq_handler) return;
 
     /* Respect the CPU's own masking. Delivering into a critical section the
      * game had closed leaves it re-entered halfway through its own bookkeeping,
      * which is exactly as broken as it sounds. SR.BL blocks everything; SR.IMASK
-     * blocks any level at or below it. The interrupt stays pending in
-     * SB_ISTNRM and gets delivered on a later poll. */
+     * blocks any level at or below it. The interrupt stays pending and gets
+     * delivered on a later poll. */
+    /* Delivering is free - no clock - so it happens on every check. What we
+     * are usually waiting for is not time passing but the game leaving a
+     * critical section, and it enters and leaves those constantly. */
     int level = vblank_irl_level();
-    if (level == 0) { g_irq_masked++; return; }
+    if (level == 0) { g_irq_masked++; g_irq_repeats = 0; return; }
     if (cpu->sr & SR_BL) { g_irq_masked++; return; }
     if ((int)((cpu->sr & SR_IMASK) >> 4) >= level) {
         g_irq_masked++;
         if (!getenv("DCRECOMP_IGNORE_IMASK")) return;
     }
+
+    /* A bit nothing ever clears would otherwise be delivered on every check
+     * forever. Count deliveries that leave something still pending and back
+     * off once there have been a few; the counter is cleared the moment the
+     * pending set empties, so a handler that is servicing what it is given
+     * never runs into this. */
+    if (g_irq_repeats > 8 && (g_irq_repeats & 0x3F))
+        { g_irq_repeats++; return; }
+    g_irq_repeats++;
 
     SH4IrqFrame f;
     memcpy(f.r, cpu->r, sizeof f.r);
@@ -206,7 +261,6 @@ void sh4_poll_irq(SH4CPU *cpu) {
                        every = e ? atoi(e) : 0; }
       if (every > 0 && (++n % every) == 0) sh4_dump_native_stack("irq"); }
 
-    last_deliver_ms = now;
     g_in_irq = true;
     g_irq_delivered++;
     g_irq_handler(cpu);
@@ -248,17 +302,58 @@ uint8_t *sh4_get_aica_ram_ptr(void) {
  * writing sound RAM keeps the value out of reach of the DMA that uploads the
  * driver, which lands on top of it. */
 #define AICA_PUBLISHED_MAX 8
-static struct { uint32_t offset, value; } g_aica_published[AICA_PUBLISHED_MAX];
+static struct { uint32_t offset, value, after_ms; } g_aica_published[AICA_PUBLISHED_MAX];
 static int g_aica_published_n = 0;
 
-void sh4_aica_publish(uint32_t offset, uint32_t value) {
+/* When the sound processor was let go, and how long the driver takes to have
+ * something to say. A hundred milliseconds is six frames: long enough for the
+ * game to go round its wait loop with interrupts open, which is what it is
+ * really there for, and short enough that nobody notices. */
+static uint64_t g_aica_arm_released_ms = 0;
+
+#define STUBBED_MAX 16
+static struct { uint32_t addr, value; } g_stubbed[STUBBED_MAX];
+static int g_stubbed_n = 0;
+
+void sh4_stub_function(uint32_t addr, uint32_t value) {
+    if (g_stubbed_n >= STUBBED_MAX)
+        return;
+    g_stubbed[g_stubbed_n].addr = addr & 0x1FFFFFFF;
+    g_stubbed[g_stubbed_n].value = value;
+    g_stubbed_n++;
+    printf("[STUB] func_%08X answered with %u instead of run\n", addr, value);
+}
+
+bool sh4_stubbed_function(uint32_t addr, uint32_t *value) {
+    addr &= 0x1FFFFFFF;
+    for (int i = 0; i < g_stubbed_n; i++)
+        if (g_stubbed[i].addr == addr) {
+            *value = g_stubbed[i].value;
+            return true;
+        }
+    return false;
+}
+
+void sh4_aica_arm_released(void) {
+    g_aica_arm_released_ms = platform_get_ticks_ms();
+    if (!g_aica_arm_released_ms)
+        g_aica_arm_released_ms = 1;
+}
+
+static int aica_driver_up_for(uint32_t ms) {
+    return g_aica_arm_released_ms &&
+           platform_get_ticks_ms() - g_aica_arm_released_ms >= ms;
+}
+
+void sh4_aica_publish(uint32_t offset, uint32_t value, uint32_t after_ms) {
     if (g_aica_published_n >= AICA_PUBLISHED_MAX)
         return;
     g_aica_published[g_aica_published_n].offset = offset;
     g_aica_published[g_aica_published_n].value = value;
+    g_aica_published[g_aica_published_n].after_ms = after_ms;
     g_aica_published_n++;
-    printf("[AICA] sound RAM +0x%X reads as 0x%08X (driver stub)\n",
-           offset, value);
+    printf("[AICA] sound RAM +0x%X reads as 0x%08X, %ums after the processor "
+           "starts (driver stub)\n", offset, value, after_ms);
 }
 
 uint32_t sh4_get_ram_size(void) {
@@ -542,12 +637,11 @@ uint32_t sh4_read32(SH4CPU *cpu, uint32_t addr) {
     uint32_t phys = translate_addr(addr);
 
     g_read_seq++;
-    /* ponytail: cheap counter gate first - polling the clock on every read
-     * costs more than the interrupt it is looking for. 64K reads is ~300
-     * checks/sec, comfortably denser than the 60Hz boundary we must catch.
-     * Too coarse and VBlank rate ends up tied to how memory-hungry the game
-     * happens to be rather than to the clock. */
-    if ((g_read_seq & 0x1FFF) == 0) sh4_poll_irq(cpu);
+    /* Check often. sh4_poll_irq consults the clock only when it has to, so
+     * the cost of a check with nothing pending is a load and a branch - and
+     * the thing we are usually waiting for is not the clock but the game
+     * leaving a critical section, which it does and undoes constantly. */
+    if ((g_read_seq & 0xFF) == 0) sh4_poll_irq(cpu);
     if ((g_read_seq & 0x3FFFFF) == 0) {
         printf("[HEARTBEAT] read32 #%uM addr=0x%08X pc=0x%08X pr=0x%08X sr=0x%08X irq=%llu reent=%llu masked=%llu\n",
                g_read_seq >> 20, addr, cpu->pc, cpu->pr, cpu->sr,
@@ -574,16 +668,28 @@ uint32_t sh4_read32(SH4CPU *cpu, uint32_t addr) {
     if (phys >= DC_AICA_BASE && phys < DC_AICA_BASE + DC_AICA_SIZE) {
         uint32_t off = phys - DC_AICA_BASE;
         uint32_t v = *(uint32_t *)(cpu->aica_ram + off);
-        /* Only answer while nothing has written the word. If the game puts
-         * its own value there, that is the real state and it wins. */
-        if (v == 0)
-            for (int i = 0; i < g_aica_published_n; i++)
-                if (g_aica_published[i].offset == off)
-                    return g_aica_published[i].value;
+        /* Only answer while nothing has written the word - if the game puts
+         * its own value there, that is the real state and it wins - and only
+         * once the driver would have been up to write it. */
+        /* Answer once the driver would have got round to this one. The
+         * delays are what make it work: a driver clears the requests already
+         * queued for it as it starts and only then reports itself ready, so
+         * the game's wait for "ready" is time its own handler gets to notice
+         * those requests finishing. Announce everything at once and the game
+         * walks out of that wait with the work still outstanding. */
+        for (int i = 0; i < g_aica_published_n; i++)
+            if (g_aica_published[i].offset == off &&
+                aica_driver_up_for(g_aica_published[i].after_ms))
+                return g_aica_published[i].value;
         /* A word in sound RAM read over and over is the CPU waiting on the
          * sound driver, which runs on a processor we do not have. Naming the
          * address and the value it is stuck on is the first thing anyone
          * needs. Set DCRECOMP_AICAPOLL to see them. */
+        { static int dl = -1; if (dl < 0) dl = getenv("DCRECOMP_AICAREADS") ? 1 : 0;
+          if (dl && g_in_irq) { static uint32_t seen[64]; static int ns = 0; int k;
+            for (k = 0; k < ns; k++) if (seen[k] == off) break;
+            if (k == ns && ns < 64) { seen[ns++] = off;
+                printf("[AICARD] handler reads +0x%X = 0x%08X\n", off, v); } } }
         static int aicalog = -1;
         if (aicalog < 0) aicalog = getenv("DCRECOMP_AICAPOLL") ? 1 : 0;
         if (aicalog) {
@@ -595,6 +701,16 @@ uint32_t sh4_read32(SH4CPU *cpu, uint32_t addr) {
                 }
             } else { last = phys; n = 1; }
         }
+        return v;
+    }
+    if (phys >= 0x00700000 && phys < 0x00710000) {
+        uint32_t v = dc_aica_reg_read(phys - 0x00700000);
+        { static int dl = -1; if (dl < 0) dl = getenv("DCRECOMP_AICAREADS") ? 1 : 0;
+          if (dl) { static uint32_t seen[64]; static int ns = 0; int k;
+            for (k = 0; k < ns; k++) if (seen[k] == phys) break;
+            if (k == ns && ns < 64) { seen[ns++] = phys;
+                printf("[AICAREG] read 0x%08X = 0x%08X%s\n", phys, v,
+                       g_in_irq ? "  (in handler)" : ""); } } }
         return v;
     }
     if (is_hw_register(phys) && g_hardware) {
@@ -793,6 +909,10 @@ void sh4_write32(SH4CPU *cpu, uint32_t addr, uint32_t val) {
     }
     if (phys >= DC_AICA_BASE && phys < DC_AICA_BASE + DC_AICA_SIZE) {
         *(uint32_t *)(cpu->aica_ram + (phys - DC_AICA_BASE)) = val;
+        return;
+    }
+    if (phys >= 0x00700000 && phys < 0x00710000) {
+        dc_aica_reg_write(phys - 0x00700000, val);
         return;
     }
     if (is_hw_register(phys) && g_hardware) {

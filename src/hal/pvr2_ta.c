@@ -31,6 +31,7 @@ static struct {
 
     /* 64-byte parameter buffering */
     uint32_t pending[8];
+    uint32_t sprite_color;   /* Sprite Base Color, from the header */
     int awaiting_second;   /* 0=no, 1=poly header, 2=vertex */
 
     /* Triangle buffers per list type */
@@ -173,6 +174,10 @@ static void ta_process_polygon(const uint32_t *data, int size) {
     g_ta.vert_size = ta_vert_size(g_ta.vert_type);
     g_ta.strip_count = 0;
 
+    /* A sprite's colour is in its header, not its vertices. */
+    if (((g_ta.pcw >> 29) & 7) == TA_PARAM_SPRITE)
+        g_ta.sprite_color = data[4];
+
     /* Extract face color for intensity mode */
     int col_type = (g_ta.pcw >> 4) & 3;
     if (col_type == 2 || col_type == 3) {
@@ -304,6 +309,30 @@ static void ta_process_vertex(const uint32_t *data) {
         }
         break;
 
+    case 15:   /* Sprite, untextured */
+    case 16: { /* Sprite, textured */
+        /* A, B and C in full; D has no z of its own - it lies on their plane,
+         * and for a screen-space quad that is C's z. */
+        PVR2RenderVertex q[4];
+        static const int off[4][3] = { {1,2,3}, {4,5,6}, {7,8,9}, {10,11,9} };
+        for (int k = 0; k < 4; k++) {
+            q[k] = (PVR2RenderVertex){0};
+            c.u = data[off[k][0]]; q[k].x = c.f;
+            c.u = data[off[k][1]]; q[k].y = c.f;
+            c.u = data[off[k][2]]; q[k].z = c.f;
+            unpack_color(g_ta.sprite_color, &q[k].r, &q[k].g, &q[k].b, &q[k].a);
+        }
+        /* Two triangles, sharing the A-C diagonal. */
+        emit_triangle_vertex(&q[0]); emit_triangle_vertex(&q[1]);
+        emit_triangle_vertex(&q[2]);
+        emit_triangle_vertex(&q[0]); emit_triangle_vertex(&q[2]);
+        emit_triangle_vertex(&q[3]);
+        g_ta.total_polygons += 2;
+        g_ta.total_vertices += 4;
+        g_ta.total_strips++;
+        return;
+    }
+
     default:
         /* Unsupported vertex type - use white with position */
         c.u = data[1]; v.x = c.f;
@@ -428,7 +457,12 @@ void pvr2_ta_write(const uint32_t *data) {
     }
 }
 
+static int g_ta_has_drawn = 0;
+
+int pvr2_ta_has_drawn(void) { return g_ta_has_drawn; }
+
 void pvr2_ta_reset(void) {
+    if (g_ta.total_vertices > 0) g_ta_has_drawn = 1;
     /* Report the first frame that actually carries geometry: the interesting
      * moment is when a game stops submitting empty lists. */
     { static int announced = 0;

@@ -75,6 +75,16 @@ void pvr2_render_destroy(void);
 /* Render all submitted geometry to the current framebuffer */
 void pvr2_render_frame(void);
 
+/* Write the frame just rendered to a binary PPM. Returns 0 on success.
+ * Driven by DCRECOMP_SCREENSHOT and DCRECOMP_SCREENSHOT_FRAME. */
+int pvr2_screenshot(const char *path);
+
+/* True once the tile accelerator has produced geometry. After that the
+ * rendered frame is the picture and the framebuffer must not be drawn over
+ * it - on hardware the render lands in the framebuffer, but our renderer
+ * draws to the window instead, so the two would fight. */
+int pvr2_ta_has_drawn(void);
+
 /* Draw the PVR2 scanout framebuffer as a fullscreen quad. `fb_addr` is FB_R_SOF1
  * and `fb_ctrl` is FB_R_CTRL, whose low bits select the pixel format. Returns
  * the number of non-black pixels, which is a useful "is anything there yet"

@@ -286,6 +286,25 @@ int pvr2_present_framebuffer(uint32_t fb_addr, uint32_t fb_ctrl, int width, int 
     return nonzero;
 }
 
+int pvr2_screenshot(const char *path) {
+    unsigned char *px = (unsigned char *)malloc((size_t)g_width * g_height * 3);
+    if (!px)
+        return -1;
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, g_width, g_height, GL_RGB, GL_UNSIGNED_BYTE, px);
+
+    FILE *f = fopen(path, "wb");
+    if (!f) { free(px); return -1; }
+    fprintf(f, "P6\n%d %d\n255\n", g_width, g_height);
+    /* OpenGL hands back the bottom row first; a PPM starts at the top. */
+    for (int y = g_height - 1; y >= 0; y--)
+        fwrite(px + (size_t)y * g_width * 3, 1, (size_t)g_width * 3, f);
+    fclose(f);
+    free(px);
+    printf("[PVR2] wrote %s (%dx%d)\n", path, g_width, g_height);
+    return 0;
+}
+
 void pvr2_render_frame(void) {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 

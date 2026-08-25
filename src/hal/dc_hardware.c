@@ -753,6 +753,26 @@ static int g_in_arm7;
 void dc_aica_reg_write(uint32_t off, uint32_t val) {
     off &= AICA_REG_SIZE - 1;
 
+    /* Channel registers are 64 blocks of 0x80 below 0x2000. Bit 15 of a
+     * block's first word is KEY_ON_EX: writing it with bit 14 set starts the
+     * channel playing. If nothing here ever fires, there is nothing to mix. */
+    if (off < 0x2000 && (off & 0x7F) == 0 && (val & 0x8000)) {
+        static int keyons;
+        static int on = -1;
+        if (on < 0) on = getenv("DCRECOMP_AICATRACE") ? 1 : 0;
+        if (on && keyons < 24) {
+            uint32_t ch = off >> 7;
+            uint32_t sa = ((val & 0x7F) << 16) | (g_aica_regs[(off + 4) / 4] & 0xFFFF);
+            printf("[AICA] ch%02u KEY%s  fmt=%u loop=%u start=%06X "
+                   "lsa=%04X lea=%04X\n",
+                   ch, (val & 0x4000) ? "ON " : "OFF",
+                   (val >> 7) & 3, (val >> 9) & 1, sa,
+                   g_aica_regs[(off + 8) / 4] & 0xFFFF,
+                   g_aica_regs[(off + 12) / 4] & 0xFFFF);
+            keyons++;
+        }
+    }
+
     if (off >= 0x2800 && off <= 0x2D10) {
         static int traced;
         static int on = -1;

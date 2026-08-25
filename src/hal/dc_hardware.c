@@ -262,9 +262,18 @@ static uint8_t *dma_resolve(uint32_t addr, uint32_t *len, const char **what) {
 /* A G2 channel that has copied its data but is not admitting to being done
  * yet. The wait is the point: a driver starts a channel and then records the
  * transfer, and clearing the start bit before it gets that far means the
- * transfer is never in its list to complete. 4MB/s is about what G2 sustains,
- * and a millisecond floor covers the small transfers. */
-#define G2_BYTES_PER_MS 4096
+ * transfer is never in its list to complete.
+ *
+ * The rate has to be roughly honest, because games time real work against it.
+ * ChuChu Rocket locks the descriptor holding its sound driver while the upload
+ * to sound RAM is in flight and only releases it from the completion
+ * interrupt, then reuses that descriptor for its tone bank about three and a
+ * half milliseconds later without waiting - so a transfer that pretends to
+ * take longer than the hardware would is a transfer that breaks it. 4MB/s put
+ * the 36KB driver upload at nearly nine milliseconds. G2 sustains well over
+ * 20MB/s, which is under 1.5ms. This did not on its own fix that game, but
+ * the old figure was simply wrong. */
+#define G2_BYTES_PER_MS 25000
 static struct {
     uint32_t base;
     int      bit;
@@ -1206,3 +1215,12 @@ int dc_gdrom_read_sectors(DCHardware *hw, uint32_t lba, uint32_t count, void *bu
 
 /* For the heartbeat: how much work the sound processor has done. */
 uint64_t dc_aica_arm_instructions(void) { return arm7_instruction_count(&g_arm7); }
+
+/* One-shot: what is the sound processor doing right now? */
+void dc_aica_arm_state(void) {
+    printf("[AICA] driver pc=%08X mode=%02X scipd=%04X scieb=%04X intreq=%u\n",
+           g_arm7.r[15], g_arm7.cpsr & 0x1F,
+           g_aica_regs[AICA_SCIPD / 4], g_aica_regs[AICA_SCIEB / 4],
+           aica_int_level());
+    arm7_dump_polled_regs();
+}

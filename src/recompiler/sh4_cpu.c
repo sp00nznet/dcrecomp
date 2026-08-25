@@ -260,6 +260,27 @@ void sh4_poll_irq(SH4CPU *cpu) {
      * SR.IMASK to be interrupted again; we just drop the second one, which
      * costs a frame at worst. If a handler ever needs to wait on a later
      * interrupt, this guard is what deadlocks and this is where to fix it. */
+    /* DCRECOMP_STACKMS=N: the recompiled call chain every N ms.
+     *
+     * Above the re-entrancy guard on purpose. The other samplers are driven
+     * by interrupts and by read volume, and this one used to sit below the
+     * guard - so all three went blind in the one case worth sampling, a run
+     * stuck inside its own interrupt handler. */
+    { static unsigned stick = 0; static int ms = -1; static uint64_t next;
+      if (ms < 0) { const char *e = getenv("DCRECOMP_STACKMS");
+                    ms = e ? atoi(e) : 0; }
+      if (ms > 0 && (++stick & 0x0F) == 0) {
+          uint64_t now = platform_get_ticks_ms();
+          if (now >= next) {
+              next = now + (uint64_t)ms;
+              printf("[SAMPLE t=%llums arm7=%lluk irq=%llu reent=%llu%s] ",
+                     (unsigned long long)now,
+                     (unsigned long long)(dc_aica_arm_instructions() / 1000),
+                     (unsigned long long)g_irq_delivered,
+                     (unsigned long long)g_irq_reentrant,
+                     g_in_irq ? " IN-HANDLER" : "");
+              sh4_dump_native_stack("sample");
+          } } }
     if (g_in_irq) { g_irq_reentrant++; return; }
 
     /* Raising is on the clock; delivering is not. With nothing pending the
@@ -284,6 +305,8 @@ void sh4_poll_irq(SH4CPU *cpu) {
     { static unsigned tick = 0;
       if ((++tick & 0x1F) == 0) {
           uint64_t now = platform_get_ticks_ms();
+
+
           if (g_last_vblank_ms == 0) g_last_vblank_ms = now;
           if (now - g_last_vblank_ms >= 16) {  /* ~60Hz */
               g_last_vblank_ms = now;

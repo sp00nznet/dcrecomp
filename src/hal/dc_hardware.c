@@ -6,6 +6,7 @@
  */
 
 #include "hal/dc_hardware.h"
+#include "hal/arm7.h"
 #include "hal/pvr2.h"
 #include "recompiler/sh4_cpu.h"
 #include "platform/platform.h"
@@ -686,28 +687,127 @@ void dc_pvr_end_list(DCHardware *hw) {
  * 0x00700000-0x00707FFF. Mostly channel state the ARM7 owns; the one that
  * matters to us is 0x00702C00, whose bit 0 holds that processor in reset. */
 #define AICA_REG_SIZE   0x8000
-#define AICA_ARM_RESET  0x2C00
+#define AICA_ARM_RESET_OFF  0x2C00
+
+/* The AICA has an interrupt controller of its own. SCI* is the ARM's side and
+ * MCI* the SH-4's, both using the same bit numbering. The driver reports a
+ * command finished by raising a bit in MCIPD, which reaches the SH-4 as the G2
+ * AICA interrupt - that reply is the thing a game sits waiting for. */
+#define AICA_TIMER_A    0x2890
+#define AICA_TIMER_B    0x2894
+#define AICA_TIMER_C    0x2898
+#define AICA_SCIEB      0x289C
+#define AICA_SCIPD      0x28A0
+#define AICA_SCIRE      0x28A4
+#define AICA_MCIEB      0x28B4
+#define AICA_MCIPD      0x28B8
+#define AICA_MCIRE      0x28BC
+#define AICA_SCILV0     0x28A8
+#define AICA_SCILV1     0x28AC
+#define AICA_SCILV2     0x28B0
+#define AICA_INTREQ     0x2D00
+#define AICA_INTCLEAR   0x2D04
+#define AICA_INT_TIMER_A  6
 
 static uint32_t g_aica_regs[AICA_REG_SIZE / 4];
+static ARM7     g_arm7;
+static bool     g_arm7_wired;
+
+static uint32_t *aica_reg(uint32_t off) {
+    return &g_aica_regs[(off & (AICA_REG_SIZE - 1)) / 4];
+}
+
+/* FIQ tracks pending-and-enabled continuously: the driver clears SCIPD through
+ * SCIRE and expects the line to drop with it. */
+static void aica_refresh_fiq(void) {
+    arm7_set_fiq(&g_arm7, (*aica_reg(AICA_SCIPD) & *aica_reg(AICA_SCIEB)) != 0);
+}
+
+/* The three SCILV registers are bit-planes, not values: for pending interrupt
+ * N, its priority level is bit N of each, low plane first. The driver's FIQ
+ * handler reads that level out of INTRequest to decide what actually fired, so
+ * a handler that always reads zero has nothing to dispatch on and spins. */
+static uint32_t aica_int_level(void) {
+    uint32_t pending = g_aica_regs[AICA_SCIPD / 4] & g_aica_regs[AICA_SCIEB / 4];
+    if (!pending)
+        return 0;
+    int n = 0;
+    while (!(pending & (1u << n)))
+        n++;
+    return ((g_aica_regs[AICA_SCILV0 / 4] >> n) & 1) |
+           (((g_aica_regs[AICA_SCILV1 / 4] >> n) & 1) << 1) |
+           (((g_aica_regs[AICA_SCILV2 / 4] >> n) & 1) << 2);
+}
 
 uint32_t dc_aica_reg_read(uint32_t off) {
-    return g_aica_regs[(off & (AICA_REG_SIZE - 1)) / 4];
+    off &= AICA_REG_SIZE - 1;
+    if (off == AICA_INTREQ)
+        return aica_int_level();
+    return g_aica_regs[off / 4];
 }
+
+/* Set while the sound processor is the one running, so the trace below can say
+ * which side of the mailbox a write came from. */
+static int g_in_arm7;
 
 void dc_aica_reg_write(uint32_t off, uint32_t val) {
     off &= AICA_REG_SIZE - 1;
+
+    if (off >= 0x2800 && off <= 0x2D10) {
+        static int traced;
+        static int on = -1;
+        if (on < 0) on = getenv("DCRECOMP_AICATRACE") ? 1 : 0;
+        if (on && traced < 60) {
+            printf("[AICA] %s writes %04X = %08X\n",
+                   g_in_arm7 ? "driver" : "SH-4 ", off, val);
+            traced++;
+        }
+    }
     uint32_t prev = g_aica_regs[off / 4];
     g_aica_regs[off / 4] = val;
 
-    if (off == AICA_ARM_RESET && (prev & 1) && !(val & 1)) {
-        /* Released. On hardware the driver boots, works through the commands
-         * the game left in sound RAM and interrupts the SH-4 to report them
-         * done. Report for it - the game's handler is what moves its own state
-         * machine on, and without this it sits waiting on a processor that is
-         * never going to answer. */
-        printf("[AICA] sound processor released from reset - "
-               "answering for the driver (stub)\n");
+    if (off == AICA_ARM_RESET_OFF && (prev & 1) && !(val & 1)) {
+        /* Released. The driver the game uploaded into sound RAM starts running
+         * for real, on the processor it was built for. */
+        if (!g_arm7_wired) {
+            arm7_init(&g_arm7, sh4_get_aica_ram_ptr(), 2 * 1024 * 1024);
+            g_arm7_wired = true;
+        }
+        arm7_set_reset(&g_arm7, false);
+        printf("[AICA] sound processor released - running its driver\n");
         sh4_aica_arm_released();
+    } else if (off == AICA_ARM_RESET_OFF && (val & 1)) {
+        arm7_set_reset(&g_arm7, true);
+    } else if (off == AICA_SCIRE) {
+        static int acks;
+        if (getenv("DCRECOMP_ARM7") && acks < 8) {
+            printf("[ARM7] driver acknowledges SCIPD bits %04X (pending %04X)%s\n",
+                   val, *aica_reg(AICA_SCIPD),
+                   ++acks == 8 ? " - servicing normally, quietening" : "");
+        }
+        *aica_reg(AICA_SCIPD) &= ~val;      /* SCIPD clears through SCIRE */
+        aica_refresh_fiq();
+    } else if (off == AICA_INTCLEAR) {
+        aica_refresh_fiq();
+    } else if (off == AICA_MCIRE) {
+        *aica_reg(AICA_MCIPD) &= ~val;
+    } else if (off == AICA_SCIPD || off == AICA_SCIEB) {
+        if (off == AICA_SCIEB && getenv("DCRECOMP_ARM7"))
+            printf("[ARM7] driver enables SCIEB=%04X  timers A=%04X B=%04X C=%04X\n",
+                   val, *aica_reg(AICA_TIMER_A), *aica_reg(AICA_TIMER_B),
+                   *aica_reg(AICA_TIMER_C));
+        aica_refresh_fiq();
+    } else if (off == AICA_MCIPD && (val & *aica_reg(AICA_MCIEB))) {
+        /* The driver answering the SH-4, which is the point of all this - but
+         * SB_ISTNRM bit 15 is level-triggered and only the game's own handler
+         * clears it. ChuChu's never does, so raising it stalls the SH-4 inside
+         * its interrupt handler and the game stops drawing. Off until the
+         * handler on the other side is understood; DCRECOMP_AICA_IRQ=1 to work
+         * on it. */
+        static int deliver = -1;
+        if (deliver < 0) deliver = getenv("DCRECOMP_AICA_IRQ") ? 1 : 0;
+        if (deliver)
+            dc_hw_raise_istnrm(15);
     }
 }
 
@@ -947,9 +1047,71 @@ void dc_aica_write_channel(DCHardware *hw, int ch, uint32_t offset, uint32_t val
     /* TODO: Implement AICA channel control */
 }
 
+/* Timer A is the driver's heartbeat. The counter runs off the 44.1kHz sample
+ * clock through a prescaler, and wraps past 0xFF into an interrupt.
+ *
+ * ponytail: driven off the wall clock rather than a cycle count, because
+ * nothing here counts SH-4 cycles to pace it against. That makes the tick rate
+ * right on average and jittery instant to instant, which a sound driver
+ * tolerates - it is counting interrupts, not timing them. ARM7_IPS below is the
+ * knob if the driver turns out to care.
+ */
+#define ARM7_IPS  64   /* ARM instructions per poll; ~2.8MHz against the SH-4 */
+
 void dc_aica_update(DCHardware *hw) {
     (void)hw;
-    /* TODO: Mix audio channels and output via SDL2 */
+    if (!g_arm7.running)
+        return;
+
+    /* Advance Timer A by however many samples have elapsed. */
+    static uint64_t last_ms;
+    uint64_t now = platform_get_ticks_ms();
+    if (!last_ms) last_ms = now;
+    if (now != last_ms) {
+        uint32_t *ta = aica_reg(AICA_TIMER_A);
+        uint32_t prescale = (*ta >> 8) & 7;
+        uint64_t samples = (now - last_ms) * 441 / 10;
+        uint32_t count = (*ta & 0xFF) + (uint32_t)(samples >> prescale);
+        last_ms = now;
+        if (count > 0xFF) {
+            *aica_reg(AICA_SCIPD) |= 1u << AICA_INT_TIMER_A;
+            aica_refresh_fiq();
+            count &= 0xFF;
+        }
+        *ta = (*ta & ~0xFFu) | count;
+    }
+
+    g_in_arm7 = 1;
+    arm7_run(&g_arm7, ARM7_IPS);
+    g_in_arm7 = 0;
+
+    /* DCRECOMP_ARM7=1: is the driver running code, and is it going anywhere? */
+    static int report = -1;
+    if (report < 0) report = getenv("DCRECOMP_ARM7") ? 1 : 0;
+    if (report) {
+        static uint64_t next_ms;
+        static uint64_t last_instrs;
+        if (now >= next_ms) {
+            next_ms = now + 1000;
+            printf("[ARM7] pc=%08X cpsr=%08X mode=%02X  +%llu instrs  "
+                   "scipd=%04X scieb=%04X mcipd=%04X\n",
+                   g_arm7.r[15], g_arm7.cpsr, g_arm7.cpsr & 0x1F,
+                   (unsigned long long)(g_arm7.instructions - last_instrs),
+                   *aica_reg(AICA_SCIPD), *aica_reg(AICA_SCIEB),
+                   *aica_reg(AICA_MCIPD));
+            last_instrs = g_arm7.instructions;
+            arm7_dump_polled_regs();
+            { const uint8_t *ram = sh4_get_aica_ram_ptr();
+              if (ram) {
+                  printf("[ARM7] mailbox 12200:");
+                  for (int i = 0; i < 8; i++)
+                      printf(" %08X", ((const uint32_t *)(ram + 0x12200))[i]);
+                  printf("\n[ARM7] reply 12400: %08X   EXEC 000F8: %08X\n",
+                         *(const uint32_t *)(ram + 0x12400),
+                         *(const uint32_t *)(ram + 0xF8));
+              } }
+        }
+    }
 }
 
 /* ========== GD-ROM ========== */

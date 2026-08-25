@@ -53,6 +53,7 @@ add_library(dcrecomp_core STATIC
     src/hal/dc_hardware.c
     src/hal/dc_bios.c
     src/hal/naomi_io.c
+    src/hal/arm7.c
     src/hal/pvr2_ta.c
     src/hal/pvr2_render.c
     src/platform/platform_sdl2.c
@@ -89,3 +90,10 @@ message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "SDL2: ${SDL2_FOUND}")
 message(STATUS "OpenGL: ${OPENGL_FOUND}")
 message(STATUS "")
+
+# Self-check for the ARM7 core: barrel-shifter edge cases, flags, banking, FIQ.
+# Built with everything else so a break shows up at once; run with ctest.
+add_executable(arm7_selftest tests/arm7_selftest.c)
+target_include_directories(arm7_selftest PRIVATE include)
+enable_testing()
+add_test(NAME arm7 COMMAND arm7_selftest)

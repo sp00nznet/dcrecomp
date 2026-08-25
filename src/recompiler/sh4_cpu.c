@@ -270,6 +270,7 @@ void sh4_poll_irq(SH4CPU *cpu) {
      * and gating the clock on "nothing pending" would let one of those stop
      * VBlank for good. */
     dc_g2_retire_finished(g_hardware);
+    dc_aica_update(g_hardware);   /* steps the sound processor */
 
     { static unsigned tick = 0;
       if ((++tick & 0x1F) == 0) {

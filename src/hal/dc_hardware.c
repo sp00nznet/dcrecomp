@@ -709,6 +709,7 @@ void dc_pvr_end_list(DCHardware *hw) {
 #define AICA_INTCLEAR   0x2D04
 #define AICA_INT_TIMER_A  6
 
+static unsigned g_aica_keyons;   /* channels actually started, ever */
 static uint32_t g_aica_regs[AICA_REG_SIZE / 4];
 static ARM7     g_arm7;
 static bool     g_arm7_wired;
@@ -757,6 +758,8 @@ void dc_aica_reg_write(uint32_t off, uint32_t val) {
      * block's first word is KEY_ON_EX: writing it with bit 14 set starts the
      * channel playing. If nothing here ever fires, there is nothing to mix. */
     if (off < 0x2000 && (off & 0x7F) == 0 && (val & 0x8000)) {
+        if (val & 0x4000 && ++g_aica_keyons == 1)
+            printf("[AICA] first channel started - the driver is playing something\n");
         static int keyons;
         static int on = -1;
         if (on < 0) on = getenv("DCRECOMP_AICATRACE") ? 1 : 0;
@@ -1076,7 +1079,23 @@ void dc_aica_write_channel(DCHardware *hw, int ch, uint32_t offset, uint32_t val
  * tolerates - it is counting interrupts, not timing them. ARM7_IPS below is the
  * knob if the driver turns out to care.
  */
-#define ARM7_IPS  64   /* ARM instructions per poll; ~2.8MHz against the SH-4 */
+/* The real part runs at 2.8MHz. Pace it off the wall clock rather than off
+ * how often the SH-4 happens to poll: tying it to the poll rate made the sound
+ * processor's speed a function of what the game was doing, and during sound
+ * init - which is exactly when the driver has work to do - the SH-4 polls
+ * rarely enough to starve it to about 97k instructions a second. The driver
+ * then took over a second to answer a request the game expected in
+ * microseconds, and the tone bank load gave up before it landed. */
+#define ARM7_HZ   2800000
+#define ARM7_MAX_BURST 8000     /* per poll, so one burst cannot stall the SH-4 */
+#define ARM7_MAX_DEBT  20000    /* ~7ms. Bigger is worse, not better: the
+                                 * processor only advances inside an SH-4
+                                 * memory access, so a large catch-up burst
+                                 * stalls the SH-4, which delays the next
+                                 * poll, which grows the debt again. Letting
+                                 * it reach 600k cost the SH-4 six sevenths
+                                 * of its memory traffic and the game stopped
+                                 * rendering entirely. */
 
 void dc_aica_update(DCHardware *hw) {
     (void)hw;
@@ -1101,9 +1120,31 @@ void dc_aica_update(DCHardware *hw) {
         *ta = (*ta & ~0xFFu) | count;
     }
 
-    g_in_arm7 = 1;
-    arm7_run(&g_arm7, ARM7_IPS);
-    g_in_arm7 = 0;
+    /* Instructions owed for the time that has actually passed, kept as a debt
+     * rather than a per-call quota.
+     *
+     * The processor only advances when the SH-4 gets here, so anything that
+     * stalls the SH-4 - a printf in a trace build, a slow frame - is time the
+     * sound processor loses. Capping each burst and throwing the rest away
+     * made that permanent: with tracing on, the driver fell far enough behind
+     * that the game's tone bank load overtook it and failed, so turning on the
+     * instrumentation was enough to break the thing being instrumented.
+     * Carrying the debt lets it catch up on the next poll instead. */
+    static uint64_t arm_last_ms;
+    static int64_t  arm_debt;
+    if (!arm_last_ms) arm_last_ms = now;
+    {
+        arm_debt += (int64_t)(now - arm_last_ms) * (ARM7_HZ / 1000);
+        arm_last_ms = now;
+        if (arm_debt > ARM7_MAX_DEBT) arm_debt = ARM7_MAX_DEBT;
+        int burst = arm_debt > ARM7_MAX_BURST ? ARM7_MAX_BURST : (int)arm_debt;
+        if (burst > 0) {
+            g_in_arm7 = 1;
+            arm7_run(&g_arm7, burst);
+            g_in_arm7 = 0;
+            arm_debt -= burst;
+        }
+    }
 
     /* DCRECOMP_ARM7=1: is the driver running code, and is it going anywhere? */
     static int report = -1;

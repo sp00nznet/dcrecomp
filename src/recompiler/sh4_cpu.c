@@ -236,6 +236,9 @@ static int vblank_irl_level(void) {
 
 /* Frames the game is owed for time a device spent that we did not, and the
  * remainder that has not yet added up to one. */
+/* The pending set as of the last delivery decision - see the back-off below. */
+static uint32_t g_last_pend = 0;
+
 static unsigned g_owed_vblanks = 0;
 static uint32_t g_owed_ms = 0;
 
@@ -303,10 +306,23 @@ void sh4_poll_irq(SH4CPU *cpu) {
     }
 
     /* A bit nothing ever clears would otherwise be delivered on every check
-     * forever. Count deliveries that leave something still pending and back
-     * off once there have been a few; the counter is cleared the moment the
-     * pending set empties, so a handler that is servicing what it is given
-     * never runs into this. */
+     * forever, so deliveries that leave something still pending back off to
+     * one in sixty-four.
+     *
+     * The back-off has to be keyed on *which* bits are pending, not just on
+     * whether any are. Resetting only when the pending set empties means a
+     * single stuck bit - a DMA completion the game does not route, say - holds
+     * the counter up for good, and then everything else is throttled with it,
+     * including whatever the game is actually waiting for. That cost ChuChu
+     * Rocket its tone bank: the sound library reuses one descriptor for the
+     * driver and the sample bank, and the release that frees it comes from an
+     * interrupt. Throttled, that interrupt arrived 451ms late, the bank load
+     * found the descriptor still busy, and sound init failed.
+     *
+     * So: any change in the pending set is new work and gets delivered at
+     * once. Only an unchanging set backs off. */
+    { uint32_t pend_now = dc_hw_get_istnrm(g_hardware) ^ dc_hw_get_istext(g_hardware);
+      if (pend_now != g_last_pend) { g_last_pend = pend_now; g_irq_repeats = 0; } }
     if (g_irq_repeats > 8 && (g_irq_repeats & 0x3F))
         { g_irq_repeats++; return; }
     g_irq_repeats++;
@@ -674,7 +690,12 @@ static bool is_hw_register(uint32_t phys_addr) {
     return false;
 }
 
+/* Memory traffic is what advances time here: every 256th access polls for
+ * interrupts, ticks the 60Hz clock and runs the sound processor. */
+static uint32_t g_read_seq = 0;
+
 uint8_t sh4_read8(SH4CPU *cpu, uint32_t addr) {
+    if ((++g_read_seq & 0xFF) == 0) sh4_poll_irq(cpu);
     uint32_t phys = translate_addr(addr);
 
     if (phys >= DC_RAM_BASE && phys < DC_RAM_BASE + cpu->ram_size) {
@@ -699,6 +720,7 @@ uint8_t sh4_read8(SH4CPU *cpu, uint32_t addr) {
 }
 
 uint16_t sh4_read16(SH4CPU *cpu, uint32_t addr) {
+    if ((++g_read_seq & 0xFF) == 0) sh4_poll_irq(cpu);
     uint32_t phys = translate_addr(addr);
 
     if (phys >= DC_RAM_BASE && phys < DC_RAM_BASE + cpu->ram_size) {
@@ -722,7 +744,6 @@ uint16_t sh4_read16(SH4CPU *cpu, uint32_t addr) {
     return 0;
 }
 
-static uint32_t g_read_seq = 0;
 
 uint32_t sh4_read32(SH4CPU *cpu, uint32_t addr) {
     /* P4 control registers */
@@ -793,7 +814,14 @@ uint32_t sh4_read32(SH4CPU *cpu, uint32_t addr) {
     /* Check often. sh4_poll_irq consults the clock only when it has to, so
      * the cost of a check with nothing pending is a load and a branch - and
      * the thing we are usually waiting for is not the clock but the game
-     * leaving a critical section, which it does and undoes constantly. */
+     * leaving a critical section, which it does and undoes constantly.
+     *
+     * Every width of read drives this, not just this one. The whole machine's
+     * sense of time hangs off it - interrupt delivery, the 60Hz clock, the
+     * sound processor's instruction budget - so a loop that happens to poll
+     * its flag with a byte read used to stop all three dead. That is what made
+     * an interrupt take most of a second to arrive during ChuChu Rocket's
+     * sound init, and it is the same starvation Crazy Taxi's init sits in. */
     if ((g_read_seq & 0xFF) == 0) sh4_poll_irq(cpu);
     if ((g_read_seq & 0x3FFFFF) == 0) {
         printf("[HEARTBEAT] read32 #%uM addr=0x%08X pc=0x%08X pr=0x%08X sr=0x%08X irq=%llu reent=%llu masked=%llu\n",

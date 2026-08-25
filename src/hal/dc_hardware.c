@@ -288,6 +288,8 @@ static void g2_start_busy(uint32_t base, int bit, uint32_t len) {
 
 /* Called from the register read and from the interrupt poll: retire any
  * channel whose time is up, clear its start bit and raise its interrupt. */
+/* Called from the tick gate in sh4_poll_irq, not from every poll - it reads
+ * the clock, which is the expensive part. */
 void dc_g2_retire_finished(DCHardware *hw) {
     if (!hw) return;
     uint64_t now = platform_get_ticks_ms();
@@ -1201,3 +1203,6 @@ int dc_gdrom_read_sectors(DCHardware *hw, uint32_t lba, uint32_t count, void *bu
     /* TODO: Read from extracted disc files */
     return 0;
 }
+
+/* For the heartbeat: how much work the sound processor has done. */
+uint64_t dc_aica_arm_instructions(void) { return arm7_instruction_count(&g_arm7); }

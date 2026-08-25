@@ -72,6 +72,8 @@ int arm7_run(ARM7 *cpu, int budget);
  * driver's whole job is servicing them. */
 void arm7_set_fiq(ARM7 *cpu, bool asserted);
 
+uint64_t arm7_instruction_count(const ARM7 *cpu);
+
 /* Debug: the registers the driver reads most, then reset the counts. */
 void arm7_dump_polled_regs(void);
 

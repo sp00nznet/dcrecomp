@@ -652,3 +652,5 @@ int arm7_run(ARM7 *cpu, int budget) {
     }
     return n;
 }
+
+uint64_t arm7_instruction_count(const ARM7 *cpu) { return cpu->instructions; }

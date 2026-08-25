@@ -252,6 +252,8 @@ void sh4_credit_elapsed_ms(uint32_t ms) {
         g_owed_vblanks = 60;
 }
 
+uint64_t dc_aica_arm_instructions(void);   /* hal/dc_hardware.c */
+
 void sh4_poll_irq(SH4CPU *cpu) {
     if (!g_hardware) return;
     /* ponytail: no nested interrupts. Hardware allows a handler that lowers
@@ -272,6 +274,10 @@ void sh4_poll_irq(SH4CPU *cpu) {
      * game may never route or clear - a DMA completion it does not use, say -
      * and gating the clock on "nothing pending" would let one of those stop
      * VBlank for good. */
+    /* Both of these read the clock, which is the expensive part of a poll, so
+     * moving them behind the tick gate below is tempting. It is wrong: it also
+     * makes the sound processor's response thirty-two times less prompt, and
+     * what the sound path races is latency, not throughput. Keep them here. */
     dc_g2_retire_finished(g_hardware);
     dc_aica_update(g_hardware);   /* steps the sound processor */
 
@@ -824,7 +830,9 @@ uint32_t sh4_read32(SH4CPU *cpu, uint32_t addr) {
      * sound init, and it is the same starvation Crazy Taxi's init sits in. */
     if ((g_read_seq & 0xFF) == 0) sh4_poll_irq(cpu);
     if ((g_read_seq & 0x3FFFFF) == 0) {
-        printf("[HEARTBEAT] read32 #%uM addr=0x%08X pc=0x%08X pr=0x%08X sr=0x%08X irq=%llu reent=%llu masked=%llu\n",
+        printf("[HEARTBEAT] t=%llums arm7=%lluk read32 #%uM addr=0x%08X pc=0x%08X pr=0x%08X sr=0x%08X irq=%llu reent=%llu masked=%llu\n",
+               (unsigned long long)platform_get_ticks_ms(),
+               (unsigned long long)(dc_aica_arm_instructions() / 1000),
                g_read_seq >> 20, addr, cpu->pc, cpu->pr, cpu->sr,
                (unsigned long long)g_irq_delivered,
                (unsigned long long)g_irq_reentrant,

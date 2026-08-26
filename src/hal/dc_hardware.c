@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Dreamcast Hardware Abstraction Layer Implementation
  *
  * Maps Dreamcast hardware registers and subsystems to modern equivalents.
@@ -115,7 +115,7 @@ uint32_t dc_hw_read32(DCHardware *hw, uint32_t addr) {
         }
         if (poll_count == 1000 && poll_reported < 60) {
             poll_reported++;
-            printf("[POLL] register 0x%08X read 1000+ times — likely stuck\n", phys);
+            printf("[POLL] register 0x%08X read 1000+ times â€” likely stuck\n", phys);
         }
     } else {
         if (poll_count >= 10 && poll_reported < 60) {
@@ -274,22 +274,46 @@ static uint8_t *dma_resolve(uint32_t addr, uint32_t *len, const char **what) {
  * 20MB/s, which is under 1.5ms. This did not on its own fix that game, but
  * the old figure was simply wrong. */
 #define G2_BYTES_PER_MS 25000
+
+/* ...and the duration is counted in polls, not milliseconds.
+ *
+ * A millisecond of ours is not a millisecond of the machine's. The SH-4 side
+ * is compiled, not emulated, and nothing paces it, so it covers far more game
+ * work per wall-clock millisecond than the hardware would. A transfer told to
+ * take one millisecond therefore finishes far later in *game* terms than it
+ * ever did on a Dreamcast - and a game that starts a transfer and then does a
+ * bounded amount of work before relying on it will lose that race every time.
+ *
+ * ChuChu Rocket does exactly that: the 36KB sound-driver upload holds its
+ * descriptor locked, and the game reuses that descriptor for its tone bank
+ * after a short, fixed amount of work. Measured, the completion was delivered
+ * 0ms after being raised - delivery was never the problem - but the raise
+ * itself waited a wall-clock millisecond, by which time the game had already
+ * been past and failed.
+ *
+ * Polls are a better clock for this. One poll is 256 SH-4 memory accesses,
+ * which on hardware is on the order of ten microseconds, so G2 moves roughly
+ * this many bytes in one. It scales with what the game is doing rather than
+ * with how fast the host happens to be. */
+#define G2_BYTES_PER_POLL 250
 static struct {
     uint32_t base;
     int      bit;
-    uint64_t done_ms;
+    uint64_t done_poll;
     int      busy;
 } g_g2_busy[5];
 
+static uint64_t g_g2_polls;   /* retire calls, the clock the busy period uses */
+
 static void g2_start_busy(uint32_t base, int bit, uint32_t len) {
-    uint64_t ms = len / G2_BYTES_PER_MS;
-    if (ms < 1) ms = 1;
+    uint64_t polls = len / G2_BYTES_PER_POLL;
+    if (polls < 1) polls = 1;
     for (int i = 0; i < 5; i++) {
         if (g_g2_busy[i].busy && g_g2_busy[i].base != base)
             continue;
         g_g2_busy[i].base = base;
         g_g2_busy[i].bit = bit;
-        g_g2_busy[i].done_ms = platform_get_ticks_ms() + ms;
+        g_g2_busy[i].done_poll = g_g2_polls + polls;
         g_g2_busy[i].busy = 1;
         return;
     }
@@ -302,8 +326,9 @@ static void g2_start_busy(uint32_t base, int bit, uint32_t len) {
 void dc_g2_retire_finished(DCHardware *hw) {
     if (!hw) return;
     uint64_t now = platform_get_ticks_ms();
+    g_g2_polls++;
     for (int i = 0; i < 5; i++) {
-        if (!g_g2_busy[i].busy || now < g_g2_busy[i].done_ms)
+        if (!g_g2_busy[i].busy || g_g2_polls < g_g2_busy[i].done_poll)
             continue;
         g_g2_busy[i].busy = 0;
         hw->hw_regs[hw_reg_idx(g_g2_busy[i].base + DMA_OFF_START)] = 0;
@@ -488,7 +513,7 @@ void dc_hw_write32(DCHardware *hw, uint32_t addr, uint32_t val) {
 
     case SB_C2DST:
         if (val & 1) {
-            /* CH2-DMA: SH4 DMAC Channel 2 → PVR (TA FIFO or VRAM)
+            /* CH2-DMA: SH4 DMAC Channel 2 â†’ PVR (TA FIFO or VRAM)
              * Source: SH4 DMAC SAR2 register (system RAM address)
              * Dest:   SB_C2DSTAT (PVR address, default 0x10000000 = TA FIFO)
              * Length: SB_C2DLEN */
@@ -511,7 +536,7 @@ void dc_hw_write32(DCHardware *hw, uint32_t addr, uint32_t val) {
                     uint32_t dest_phys = c2d_dest & 0x1FFFFFFF;
 
                     if (dest_phys >= 0x10000000 && dest_phys < 0x10800000) {
-                        /* DMA to TA FIFO — send as 32-byte packets */
+                        /* DMA to TA FIFO â€” send as 32-byte packets */
                         int packets = 0;
                         for (uint32_t off = 0; off + 32 <= c2d_len; off += 32) {
                             const uint32_t *pkt = (const uint32_t *)(ram + ((src_offset + off) & ram_mask));
@@ -523,7 +548,7 @@ void dc_hw_write32(DCHardware *hw, uint32_t addr, uint32_t val) {
                                    packets, c2d_len);
                         }
                     } else if (dest_phys >= 0x11000000 && dest_phys < 0x12000000) {
-                        /* DMA to TA texture path → VRAM write */
+                        /* DMA to TA texture path â†’ VRAM write */
                         uint8_t *vram = sh4_get_vram_ptr();
                         if (vram) {
                             uint32_t vram_offset = dest_phys - 0x11000000;
@@ -566,7 +591,7 @@ void dc_hw_write32(DCHardware *hw, uint32_t addr, uint32_t val) {
 
     case SB_SDST:
         if (val & 1) {
-            /* Sort-DMA: system RAM → TA with sorting */
+            /* Sort-DMA: system RAM â†’ TA with sorting */
             uint32_t sd_tag  = hw->hw_regs[hw_reg_idx(SB_SDSTAG)];
             uint32_t sd_star = hw->hw_regs[hw_reg_idx(SB_SDSTAR)];
             uint32_t sd_len  = hw->hw_regs[hw_reg_idx(SB_SDLEN)];
@@ -939,7 +964,7 @@ void dc_maple_dma(DCHardware *hw, uint32_t mdstar) {
             /* Check if port has a connected device */
             bool has_device = (port < 4) && hw->controller_connected[port];
 
-            /* Non-main-unit subdevices (reci & 0x1F != 0) or no device → -1 */
+            /* Non-main-unit subdevices (reci & 0x1F != 0) or no device â†’ -1 */
             if (!has_device || (reci & 0x1F) != 0) {
                 resp[0] = (uint32_t)-1;
             } else {

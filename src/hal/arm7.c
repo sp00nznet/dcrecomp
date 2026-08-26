@@ -316,7 +316,11 @@ static int cond_holds(const ARM7 *cpu, uint32_t op) {
 
 static bool g_fiq_line;
 
+static uint64_t g_fiqs_taken;
+uint64_t arm7_fiq_count(const ARM7 *cpu) { (void)cpu; return g_fiqs_taken; }
+
 static void take_fiq(ARM7 *cpu) {
+    g_fiqs_taken++;
     uint32_t ret = cpu->r[15] + 4;
     uint32_t saved = cpu->cpsr;
     set_mode(cpu, ARM7_MODE_FIQ);

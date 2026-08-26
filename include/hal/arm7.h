@@ -77,5 +77,6 @@ uint64_t arm7_instruction_count(const ARM7 *cpu);
 /* Debug: the registers the driver reads most, then reset the counts. */
 void arm7_dump_polled_regs(void);
 void arm7_dump_polled_ram(void);
+uint64_t arm7_fiq_count(const ARM7 *cpu);
 
 #endif /* DCRECOMP_ARM7_H */

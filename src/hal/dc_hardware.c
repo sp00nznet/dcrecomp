@@ -751,6 +751,7 @@ void dc_pvr_end_list(DCHardware *hw) {
 #define AICA_INTCLEAR   0x2D04
 #define AICA_INT_TIMER_A  6
 
+static unsigned g_timer_a_fires;   /* Timer A overflows, ever */
 static unsigned g_aica_keyons;   /* channels actually started, ever */
 static uint32_t g_aica_regs[AICA_REG_SIZE / 4];
 static ARM7     g_arm7;
@@ -758,6 +759,39 @@ static bool     g_arm7_wired;
 
 static uint32_t *aica_reg(uint32_t off) {
     return &g_aica_regs[(off & (AICA_REG_SIZE - 1)) / 4];
+}
+
+/* Timer A counts the AICA's 44.1kHz sample clock, and the sound processor runs
+ * at 2.8MHz in the same clock domain - one sample per about 63 instructions.
+ * Advancing it from the processor's own progress rather than from the wall
+ * clock matters more than it sounds: the headless build's clock is
+ * GetTickCount64, whose granularity is 15.6ms, so a timer driven off it can
+ * fire at most sixty-odd times a second. ChuChu Rocket's driver programs Timer
+ * A to fire every 44 samples - a thousand times a second - and got twenty-five,
+ * which is why its initialisation never finished.
+ *
+ * ponytail: one fire per call, so a call long enough to span two periods drops
+ * a tick. Keeping ARM7_MAX_BURST below one period is what stops that; if the
+ * burst ever grows past ~2800, this needs a loop. */
+#define ARM7_INSTRS_PER_SAMPLE 63
+
+static void aica_advance_timer_a(int instructions) {
+    static int frac;
+    frac += instructions;
+    int samples = frac / ARM7_INSTRS_PER_SAMPLE;
+    if (samples <= 0)
+        return;
+    frac -= samples * ARM7_INSTRS_PER_SAMPLE;
+
+    uint32_t *ta = aica_reg(AICA_TIMER_A);
+    uint32_t count = (*ta & 0xFF) + ((uint32_t)samples >> ((*ta >> 8) & 7));
+    if (count > 0xFF) {
+        g_timer_a_fires++;
+        *aica_reg(AICA_SCIPD) |= 1u << AICA_INT_TIMER_A;
+        arm7_set_fiq(&g_arm7, (*aica_reg(AICA_SCIPD) & *aica_reg(AICA_SCIEB)) != 0);
+        count &= 0xFF;
+    }
+    *ta = (*ta & ~0xFFu) | count;
 }
 
 /* FIQ tracks pending-and-enabled continuously: the driver clears SCIPD through
@@ -1129,8 +1163,15 @@ void dc_aica_write_channel(DCHardware *hw, int ch, uint32_t offset, uint32_t val
  * then took over a second to answer a request the game expected in
  * microseconds, and the tone bank load gave up before it landed. */
 #define ARM7_HZ   2800000
-#define ARM7_MAX_BURST 8000     /* per poll, so one burst cannot stall the SH-4 */
-#define ARM7_MAX_DEBT  20000    /* ~7ms. Bigger is worse, not better: the
+#define ARM7_MAX_BURST 2000     /* under one Timer A period - see
+                                 * aica_advance_timer_a - and small enough that
+                                 * one burst cannot stall the SH-4 */
+/* One tick of the coarsest clock we run on. GetTickCount64 moves in 15.6ms
+ * steps, so a debt ceiling below 15.6ms x 2.8MHz = ~44k instructions throws
+ * away most of every tick and the processor crawls at a twentieth of its
+ * speed - which starved ChuChu Rocket's driver of the Timer A interrupts its
+ * initialisation counts on. */
+#define ARM7_MAX_DEBT  64000    /* was 20000. Bigger is worse past this: the
                                  * processor only advances inside an SH-4
                                  * memory access, so a large catch-up burst
                                  * stalls the SH-4, which delays the next
@@ -1144,23 +1185,7 @@ void dc_aica_update(DCHardware *hw) {
     if (!g_arm7.running)
         return;
 
-    /* Advance Timer A by however many samples have elapsed. */
-    static uint64_t last_ms;
     uint64_t now = platform_get_ticks_ms();
-    if (!last_ms) last_ms = now;
-    if (now != last_ms) {
-        uint32_t *ta = aica_reg(AICA_TIMER_A);
-        uint32_t prescale = (*ta >> 8) & 7;
-        uint64_t samples = (now - last_ms) * 441 / 10;
-        uint32_t count = (*ta & 0xFF) + (uint32_t)(samples >> prescale);
-        last_ms = now;
-        if (count > 0xFF) {
-            *aica_reg(AICA_SCIPD) |= 1u << AICA_INT_TIMER_A;
-            aica_refresh_fiq();
-            count &= 0xFF;
-        }
-        *ta = (*ta & ~0xFFu) | count;
-    }
 
     /* Instructions owed for the time that has actually passed, kept as a debt
      * rather than a per-call quota.
@@ -1195,6 +1220,7 @@ void dc_aica_update(DCHardware *hw) {
             arm7_run(&g_arm7, burst);
             g_in_arm7 = 0;
             arm_debt -= burst;
+            aica_advance_timer_a(burst);
         }
     }
 
@@ -1215,6 +1241,9 @@ void dc_aica_update(DCHardware *hw) {
             last_instrs = g_arm7.instructions;
             arm7_dump_polled_regs();
             arm7_dump_polled_ram();
+            printf("[ARM7] timerA fires=%u  ta=%04X  fiq_taken=%llu\n",
+                   g_timer_a_fires, *aica_reg(AICA_TIMER_A),
+                   (unsigned long long)arm7_fiq_count(&g_arm7));
             { const uint8_t *ram = sh4_get_aica_ram_ptr();
               if (ram) {
                   printf("[ARM7] mailbox 12200:");

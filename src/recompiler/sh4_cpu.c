@@ -281,6 +281,20 @@ void sh4_poll_irq(SH4CPU *cpu) {
                      g_in_irq ? " IN-HANDLER" : "");
               sh4_dump_native_stack("sample");
           } } }
+    /* The sound processor is a separate chip and keeps running while the SH-4
+     * is inside an interrupt handler, so step it above the re-entrancy guard.
+     * Below it, the driver stopped dead for the whole of every handler and lost
+     * most of its execution: ChuChu Rocket's spends enough time in there to
+     * hold the driver to a fraction of its clock, and the driver counts Timer A
+     * interrupts to sequence its own initialisation.
+     *
+     * These read the clock, which is the expensive part of a poll, so moving
+     * them behind the tick gate below is tempting. It is wrong: it makes the
+     * sound processor's response thirty-two times less prompt, and what the
+     * sound path races is latency, not throughput. */
+    dc_g2_retire_finished(g_hardware);
+    dc_aica_update(g_hardware);   /* steps the sound processor */
+
     if (g_in_irq) { g_irq_reentrant++; return; }
 
     /* Raising is on the clock; delivering is not. With nothing pending the
@@ -295,12 +309,6 @@ void sh4_poll_irq(SH4CPU *cpu) {
      * game may never route or clear - a DMA completion it does not use, say -
      * and gating the clock on "nothing pending" would let one of those stop
      * VBlank for good. */
-    /* Both of these read the clock, which is the expensive part of a poll, so
-     * moving them behind the tick gate below is tempting. It is wrong: it also
-     * makes the sound processor's response thirty-two times less prompt, and
-     * what the sound path races is latency, not throughput. Keep them here. */
-    dc_g2_retire_finished(g_hardware);
-    dc_aica_update(g_hardware);   /* steps the sound processor */
 
     { static unsigned tick = 0;
       if ((++tick & 0x1F) == 0) {

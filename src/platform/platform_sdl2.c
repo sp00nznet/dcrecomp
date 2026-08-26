@@ -70,6 +70,20 @@ void platform_set_title(const char *title) {
     printf("[PLATFORM] Title: %s\n", title);
 }
 
+uint64_t platform_get_ticks_us(void) {
+#ifdef _WIN32
+    static LARGE_INTEGER freq;
+    LARGE_INTEGER now;
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&now);
+    return (uint64_t)((now.QuadPart * 1000000) / freq.QuadPart);
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+#endif
+}
+
 uint64_t platform_get_ticks_ms(void) {
 #ifdef _WIN32
     return GetTickCount64();
@@ -194,6 +208,12 @@ void platform_set_title(const char *title) {
 
 uint64_t platform_get_ticks_ms(void) {
     return SDL_GetTicks64();
+}
+
+uint64_t platform_get_ticks_us(void) {
+    static Uint64 freq;
+    if (!freq) freq = SDL_GetPerformanceFrequency();
+    return (uint64_t)((SDL_GetPerformanceCounter() * 1000000) / freq);
 }
 
 void platform_sleep_ms(uint32_t ms) {

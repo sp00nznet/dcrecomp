@@ -30,6 +30,12 @@ void platform_set_title(const char *title);
 /* Get current time in milliseconds */
 uint64_t platform_get_ticks_ms(void);
 
+/* Microseconds since start. The millisecond clock above is GetTickCount64 on
+ * Windows, which moves in 15.6ms steps - too coarse for anything that has to
+ * happen more than sixty times a second, such as the AICA's sample-rate
+ * timers. Monotonic, but not related to the millisecond clock's origin. */
+uint64_t platform_get_ticks_us(void);
+
 /* Sleep for specified milliseconds */
 void platform_sleep_ms(uint32_t ms);
 

@@ -173,7 +173,7 @@ uint32_t dc_hw_read32(DCHardware *hw, uint32_t addr) {
          * wait for a line or for vblank, and both arrive promptly. Frame pace
          * still comes from the 60Hz VBlank interrupt, not from here. Anchor
          * this to a microsecond clock if a game ever needs the real rate. */
-        uint64_t now = platform_get_ticks_ms();
+    uint64_t now = platform_get_ticks_ms();
         static uint32_t line = 0;
         line = (line + 1) % 525;
         uint32_t scanline = line;
@@ -761,30 +761,37 @@ static uint32_t *aica_reg(uint32_t off) {
     return &g_aica_regs[(off & (AICA_REG_SIZE - 1)) / 4];
 }
 
-/* Timer A counts the AICA's 44.1kHz sample clock, and the sound processor runs
- * at 2.8MHz in the same clock domain - one sample per about 63 instructions.
- * Advancing it from the processor's own progress rather than from the wall
- * clock matters more than it sounds: the headless build's clock is
- * GetTickCount64, whose granularity is 15.6ms, so a timer driven off it can
- * fire at most sixty-odd times a second. ChuChu Rocket's driver programs Timer
- * A to fire every 44 samples - a thousand times a second - and got twenty-five,
- * which is why its initialisation never finished.
+/* Timer A counts the AICA's 44.1kHz sample clock - 44.1 samples per
+ * millisecond - and it does that whether or not the processor beside it is
+ * getting any work done. Driving it from the microsecond clock keeps the two
+ * independent, which is how the hardware is: an earlier version advanced it
+ * from instructions retired, and then a processor running at a fifth of its
+ * clock got a timer running at a fifth of its rate.
  *
- * ponytail: one fire per call, so a call long enough to span two periods drops
- * a tick. Keeping ARM7_MAX_BURST below one period is what stops that; if the
- * burst ever grows past ~2800, this needs a loop. */
-#define ARM7_INSTRS_PER_SAMPLE 63
+ * The millisecond clock is no good for this. On Windows it is GetTickCount64
+ * and moves in 15.6ms steps, so a timer driven off it fires sixty-odd times a
+ * second at best. ChuChu Rocket's driver programs Timer A for a thousand and
+ * counts those interrupts to sequence its own initialisation.
+ *
+ * A period can be as short as 44 samples, so catching up across a long gap
+ * means several overflows; the driver only sees one interrupt for them, which
+ * is what the hardware would do too - SCIPD is a bit, not a count. */
+static void aica_advance_timer_a(void) {
+    static uint64_t last_us;
+    static uint32_t frac_us;
 
-static void aica_advance_timer_a(int instructions) {
-    static int frac;
-    frac += instructions;
-    int samples = frac / ARM7_INSTRS_PER_SAMPLE;
-    if (samples <= 0)
+    uint64_t now_us = platform_get_ticks_us();
+    if (!last_us) { last_us = now_us; return; }
+
+    uint64_t elapsed = now_us - last_us + frac_us;
+    uint32_t samples = (uint32_t)(elapsed * 441 / 10000);   /* 44.1 per ms */
+    if (!samples)
         return;
-    frac -= samples * ARM7_INSTRS_PER_SAMPLE;
+    frac_us = (uint32_t)(elapsed - (uint64_t)samples * 10000 / 441);
+    last_us = now_us;
 
     uint32_t *ta = aica_reg(AICA_TIMER_A);
-    uint32_t count = (*ta & 0xFF) + ((uint32_t)samples >> ((*ta >> 8) & 7));
+    uint32_t count = (*ta & 0xFF) + (samples >> ((*ta >> 8) & 7));
     if (count > 0xFF) {
         g_timer_a_fires++;
         *aica_reg(AICA_SCIPD) |= 1u << AICA_INT_TIMER_A;
@@ -1163,9 +1170,18 @@ void dc_aica_write_channel(DCHardware *hw, int ch, uint32_t offset, uint32_t val
  * then took over a second to answer a request the game expected in
  * microseconds, and the tone bank load gave up before it landed. */
 #define ARM7_HZ   2800000
-#define ARM7_MAX_BURST 2000     /* under one Timer A period - see
-                                 * aica_advance_timer_a - and small enough that
-                                 * one burst cannot stall the SH-4 */
+/* Big on purpose. The processor only advances when the SH-4 reaches
+ * dc_aica_update, which happens once per 256 SH-4 memory accesses - so the
+ * busier the SH-4, the more the sound chip runs, which is exactly backwards.
+ * When the game is *waiting* on the driver it does almost no memory access,
+ * the driver is called sixty times a second instead of thousands, and the wait
+ * can never end: the thing being waited for only runs when the waiter is busy.
+ *
+ * A burst large enough to clear a whole tick's debt in one call ought to break
+ * that loop. Tried at 50000 and it did not - the processor is not
+ * debt-limited, so the shortfall is upstream of this. Left at a size that
+ * cannot stall the SH-4 noticeably. */
+#define ARM7_MAX_BURST 4000
 /* One tick of the coarsest clock we run on. GetTickCount64 moves in 15.6ms
  * steps, so a debt ceiling below 15.6ms x 2.8MHz = ~44k instructions throws
  * away most of every tick and the processor crawls at a twentieth of its
@@ -1184,6 +1200,8 @@ void dc_aica_update(DCHardware *hw) {
     (void)hw;
     if (!g_arm7.running)
         return;
+
+    aica_advance_timer_a();
 
     uint64_t now = platform_get_ticks_ms();
 
@@ -1220,7 +1238,6 @@ void dc_aica_update(DCHardware *hw) {
             arm7_run(&g_arm7, burst);
             g_in_arm7 = 0;
             arm_debt -= burst;
-            aica_advance_timer_a(burst);
         }
     }
 

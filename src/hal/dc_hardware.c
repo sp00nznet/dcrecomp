@@ -306,7 +306,13 @@ static struct {
 static uint64_t g_g2_polls;   /* retire calls, the clock the busy period uses */
 
 static void g2_start_busy(uint32_t base, int bit, uint32_t len) {
-    uint64_t polls = len / G2_BYTES_PER_POLL;
+    /* DCRECOMP_G2_BPP overrides the rate, for bisecting a game that races its
+     * own transfers. */
+    static int bpp = -1;
+    if (bpp < 0) { const char *e = getenv("DCRECOMP_G2_BPP");
+                   bpp = e ? atoi(e) : G2_BYTES_PER_POLL;
+                   if (bpp < 1) bpp = G2_BYTES_PER_POLL; }
+    uint64_t polls = len / (uint32_t)bpp;
     if (polls < 1) polls = 1;
     for (int i = 0; i < 5; i++) {
         if (g_g2_busy[i].busy && g_g2_busy[i].base != base)
@@ -857,16 +863,16 @@ void dc_aica_reg_write(uint32_t off, uint32_t val) {
                    *aica_reg(AICA_TIMER_C));
         aica_refresh_fiq();
     } else if (off == AICA_MCIPD && (val & *aica_reg(AICA_MCIEB))) {
-        /* The driver answering the SH-4, which is the point of all this - but
-         * SB_ISTNRM bit 15 is level-triggered and only the game's own handler
-         * clears it. ChuChu's never does, so raising it stalls the SH-4 inside
-         * its interrupt handler and the game stops drawing. Off until the
-         * handler on the other side is understood; DCRECOMP_AICA_IRQ=1 to work
-         * on it. */
-        static int deliver = -1;
-        if (deliver < 0) deliver = getenv("DCRECOMP_AICA_IRQ") ? 1 : 0;
-        if (deliver)
-            dc_hw_raise_istnrm(15);
+        /* The driver answering the SH-4. This is an *external* interrupt -
+         * SB_ISTEXT bit 1, summarised into SB_ISTNRM bit 30 - the same shape
+         * as the GD-ROM's completion signal above.
+         *
+         * It was wired to SB_ISTNRM bit 15 before, which is the G2 channel-0
+         * DMA-end bit and belongs to the transfer, not the chip. Nothing the
+         * game does clears bit 15 on its behalf, so raising it there stalled
+         * the SH-4 in its handler and had to be kept behind a switch. On the
+         * external line the game's own dispatcher acknowledges it. */
+        dc_hw_signal_aica(sh4_get_hardware());
     }
 }
 
@@ -1170,10 +1176,20 @@ void dc_aica_update(DCHardware *hw) {
     static int64_t  arm_debt;
     if (!arm_last_ms) arm_last_ms = now;
     {
-        arm_debt += (int64_t)(now - arm_last_ms) * (ARM7_HZ / 1000);
+        /* DCRECOMP_ARM7_HZ / _BURST / _DEBT override these, for working out
+         * whether a game is racing the sound processor. */
+        static int hz = -1, maxburst, maxdebt;
+        if (hz < 0) { const char *e;
+                      e = getenv("DCRECOMP_ARM7_HZ");    hz = e ? atoi(e) : ARM7_HZ;
+                      e = getenv("DCRECOMP_ARM7_BURST"); maxburst = e ? atoi(e) : ARM7_MAX_BURST;
+                      e = getenv("DCRECOMP_ARM7_DEBT");  maxdebt = e ? atoi(e) : ARM7_MAX_DEBT;
+                      if (hz < 1) hz = ARM7_HZ;
+                      if (maxburst < 1) maxburst = ARM7_MAX_BURST;
+                      if (maxdebt < 1) maxdebt = ARM7_MAX_DEBT; }
+        arm_debt += (int64_t)(now - arm_last_ms) * (hz / 1000);
         arm_last_ms = now;
-        if (arm_debt > ARM7_MAX_DEBT) arm_debt = ARM7_MAX_DEBT;
-        int burst = arm_debt > ARM7_MAX_BURST ? ARM7_MAX_BURST : (int)arm_debt;
+        if (arm_debt > maxdebt) arm_debt = maxdebt;
+        int burst = arm_debt > maxburst ? maxburst : (int)arm_debt;
         if (burst > 0) {
             g_in_arm7 = 1;
             arm7_run(&g_arm7, burst);
@@ -1222,6 +1238,14 @@ void dc_gdrom_signal_complete(DCHardware *hw) {
     hw->sb_istext |= 1u;          /* external: GD-ROM */
     hw->sb_istnrm |= (1u << 30);  /* summary bit for external interrupts */
     hw->sb_istnrm |= (1u << 14);  /* G1 DMA end - how a DMAREAD finishes */
+}
+
+/* The AICA signals the SH-4 the same way the drive does: an external
+ * interrupt, SB_ISTEXT bit 1, summarised into SB_ISTNRM bit 30. */
+void dc_hw_signal_aica(DCHardware *hw) {
+    if (!hw) return;
+    hw->sb_istext |= (1u << 1);
+    hw->sb_istnrm |= (1u << 30);
 }
 
 void dc_gdrom_init(DCHardware *hw) {

@@ -304,9 +304,26 @@ void sh4_poll_irq(SH4CPU *cpu) {
 
     { static unsigned tick = 0;
       if ((++tick & 0x1F) == 0) {
+          /* DCRECOMP_VBLANK_POLLS=N raises VBlank every N polls instead of
+           * every 16ms.
+           *
+           * The wall clock is the default and gives the right frame rate, but
+           * it makes the machine non-repeatable: the SH-4 is compiled and
+           * unpaced, so how much game work falls between two VBlanks depends
+           * on host load, and a game whose behaviour turns on a race between
+           * an interrupt and its own progress takes a different path every
+           * run. ChuChu Rocket's tone bank load is such a race, and nothing
+           * tunes while the input keeps moving. Counting polls makes runs
+           * repeatable, at the cost of tying frame pace to host speed - for
+           * bisecting a race, not for playing. One poll is 256 accesses. */
+          static int vpolls = -1;
+          if (vpolls < 0) { const char *e = getenv("DCRECOMP_VBLANK_POLLS");
+                            vpolls = e ? atoi(e) : 0; }
+          if (vpolls > 0) {
+              static unsigned since;
+              if (++since >= (unsigned)vpolls) { since = 0; dc_pvr_wait_vblank(g_hardware); }
+          } else {
           uint64_t now = platform_get_ticks_ms();
-
-
           if (g_last_vblank_ms == 0) g_last_vblank_ms = now;
           if (now - g_last_vblank_ms >= 16) {  /* ~60Hz */
               g_last_vblank_ms = now;
@@ -314,6 +331,7 @@ void sh4_poll_irq(SH4CPU *cpu) {
           } else if (g_owed_vblanks) {
               g_owed_vblanks--;
               dc_pvr_wait_vblank(g_hardware);
+          }
           }
       } }
     if (!g_irq_handler) return;

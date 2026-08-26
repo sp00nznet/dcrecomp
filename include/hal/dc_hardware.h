@@ -183,6 +183,9 @@ uint32_t dc_hw_get_istnrm(DCHardware *hw);
 /* Pending SB_ISTEXT bits. */
 uint32_t dc_hw_get_istext(DCHardware *hw);
 
+/* AICA -> SH-4: SB_ISTEXT bit 1, summarised into SB_ISTNRM bit 30. */
+void dc_hw_signal_aica(DCHardware *hw);
+
 /* Finish any G2 transfer whose time is up. Safe to call often. */
 void dc_g2_retire_finished(DCHardware *hw);
 

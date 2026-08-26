@@ -37,6 +37,30 @@ static uint32_t  g_ram_mask;
 static uint32_t g_reg_reads[ARM7_REG_SIZE / 4];
 static int      g_count_reads = -1;
 
+/* Sound RAM the driver reads most. Same question as the register counter, for
+ * the case where a driver is spinning on a mailbox rather than a register. */
+static uint16_t *g_ram_reads;
+
+void arm7_dump_polled_ram(void) {
+    if (!g_ram_reads) return;
+    uint32_t top[6] = {0};
+    uint32_t n = (g_ram_mask + 1) >> 2;
+    for (uint32_t i = 0; i < n; i++) {
+        for (int k = 0; k < 6; k++) {
+            if (g_ram_reads[i] > g_ram_reads[top[k]]) {
+                for (int j = 5; j > k; j--) top[j] = top[j - 1];
+                top[k] = i;
+                break;
+            }
+        }
+    }
+    printf("[ARM7] most-read sound RAM:");
+    for (int k = 0; k < 6 && g_ram_reads[top[k]]; k++)
+        printf("  %06X x%u", top[k] * 4, g_ram_reads[top[k]]);
+    printf("\n");
+    memset(g_ram_reads, 0, (size_t)n * sizeof *g_ram_reads);
+}
+
 void arm7_dump_polled_regs(void) {
     int top[6] = {0};
     for (uint32_t i = 0; i < ARM7_REG_SIZE / 4; i++) {
@@ -70,6 +94,10 @@ static uint32_t arm7_read32(uint32_t addr) {
     if (!g_ram)
         return 0;
     addr &= g_ram_mask & ~3u;
+    if (g_count_reads > 0) {
+        if (!g_ram_reads) g_ram_reads = calloc((g_ram_mask + 1) >> 2, sizeof *g_ram_reads);
+        if (g_ram_reads && g_ram_reads[addr >> 2] < 0xFFFF) g_ram_reads[addr >> 2]++;
+    }
     return (uint32_t)g_ram[addr] | ((uint32_t)g_ram[addr + 1] << 8) |
            ((uint32_t)g_ram[addr + 2] << 16) | ((uint32_t)g_ram[addr + 3] << 24);
 }

@@ -1214,6 +1214,7 @@ void dc_aica_update(DCHardware *hw) {
                    *aica_reg(AICA_MCIPD));
             last_instrs = g_arm7.instructions;
             arm7_dump_polled_regs();
+            arm7_dump_polled_ram();
             { const uint8_t *ram = sh4_get_aica_ram_ptr();
               if (ram) {
                   printf("[ARM7] mailbox 12200:");

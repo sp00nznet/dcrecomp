@@ -9,3 +9,9 @@ build/
 *.exe
 *.lib
 *.pdb
+
+# Recompiler output. It is derived from the game's own executable, so it is
+# never committed - see README "Status".
+src/game/
+include/game/
+*_functions.json

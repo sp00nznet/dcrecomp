@@ -2,6 +2,15 @@
 
 A framework for statically recompiling Sega Dreamcast and Naomi arcade games from SH-4 binary code to native C. This is **not** an emulator - the original game code is translated ahead-of-time into C functions that compile natively on modern hardware.
 
+## Status
+
+Alpha, no tagged release yet. Crazy Taxi links and Mushiking runs with SDL2 +
+OpenGL; most hardware past the CPU is partial (table below). There is no
+conformance harness yet - see [ROADMAP.md](ROADMAP.md).
+
+Generated source is **not distributed**. You run the recompiler on your own
+disc or ROM and the output lands in your game repo's gitignored `src/game/`.
+
 ## Architecture
 
 The Dreamcast and Naomi arcade boards share the same core hardware:
@@ -136,24 +145,20 @@ dcrecomp supports two hardware emulation backends:
 The original homespun hardware abstraction (`src/hal/`). Simple register stubs
 suitable for initial bring-up and headless testing. Limited accuracy.
 
-### Accurate hardware backend (planned)
+### Accurate hardware backend (not started)
 
-The intended path is the one other recomp projects take (e.g. Xenia -> Xenon
-recomp): take a mature emulator, strip its CPU interpreter/JIT, and link its
-hardware subsystems against statically recompiled game code.
-
-For Dreamcast/Naomi that emulator is [Flycast](https://github.com/flyinghead/flycast),
-which is **GPLv2**. dcrecomp itself is MIT and ships no Flycast code. Anything
-built by linking Flycast subsystems is a GPLv2 derivative and must be
-distributed as such - so that backend belongs in a separate, explicitly GPLv2
-repository, not here. See `docs/flycast-extraction.md` for the extraction notes.
+Linking Flycast's hardware subsystems against recompiled code instead of the
+lightweight HAL. dcrecomp is GPL-2.0, so that is licence-compatible; it is not
+built. See [ROADMAP.md](ROADMAP.md).
 
 ## Current Projects
 
-- **Crazy Taxi** (Dreamcast) - 11,561 functions, first link achieved
+- **Crazy Taxi** (Dreamcast) - 12,750 functions, first link achieved
 - **Mushiking: King of Beetles** (Naomi) - 26,004 functions, SDL2+OpenGL build running
 
 ## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to send a change.
 
 This framework is designed to make Dreamcast/Naomi static recompilation accessible.
 To recomp a new game:
@@ -166,7 +171,14 @@ To recomp a new game:
 6. Write a `main.c` bootstrap (set entry point, RAM size, BIOS state)
 7. Build and iterate on hardware interactions
 
+Entry points the analysis can't find go in the game repo's `--entries` file
+([docs/entries.md](docs/entries.md)).
+
 See Mushiking (kingofbeetle) as a reference implementation.
+
+## Contributors
+
+People who found or fixed things are credited in [CONTRIBUTORS.md](CONTRIBUTORS.md).
 
 ## Credits & prior art
 
@@ -178,9 +190,10 @@ dcrecomp stands on work others did first. If you use any of it, credit them too.
   playback and early stage loading working. Worth reading before assuming
   anything here is novel.
 - **[Flycast](https://github.com/flyinghead/flycast)** (flyinghead, GPLv2) - the
-  reference for how Dreamcast hardware actually behaves. dcrecomp ships no
-  Flycast code, but the PVR2/Holly/AICA register semantics implemented here were
-  learned by reading it.
+  reference for how Dreamcast hardware actually behaves. dcrecomp's HAL is
+  derived from it: the PVR2/Holly/AICA register handling was written from
+  reading its source, and the Maple DMA handler follows its `maple_DoDma`.
+  That is why dcrecomp is GPL-2.0. See [NOTICE](NOTICE).
 - **[N64Recomp](https://github.com/N64Recomp/N64Recomp)** (Wiseguy) - established
   the static-recompilation-as-preservation approach this project copies.
 - **[tbg-decomp](https://github.com/lhsazevedo/tokyo-bus-guide-decomp)**
@@ -194,11 +207,10 @@ dcrecomp stands on work others did first. If you use any of it, credit them too.
 
 ## License
 
-MIT - see [LICENSE](LICENSE).
+GPL-2.0 - see [LICENSE](LICENSE). Parts of the HAL are derived from Flycast
+(GPL-2.0); [NOTICE](NOTICE) lists them. dcrecomp was published as MIT until
+2026-10-20.
 
-Applies to the framework: the recompiler tools, CPU/HAL/platform sources, and
-headers in this repository. It does **not** grant any rights to game code
-produced by running these tools on a commercial ROM or disc image - that output
-remains the copyright of the original publisher.
-
-This repository intentionally contains no GPL-licensed emulator code.
+The licence covers the framework: the recompiler tools, CPU/HAL/platform
+sources and headers. It grants no rights to game code produced by running these
+tools on a commercial ROM or disc image - that remains the publisher's.

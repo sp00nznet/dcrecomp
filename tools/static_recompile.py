@@ -29,8 +29,9 @@ def sext12(v):
 class SH4Recompiler:
     """Translates SH-4 binary functions to C code."""
 
-    def __init__(self, binary_data, base_addr=LOAD_ADDR):
+    def __init__(self, binary_data, base_addr=LOAD_ADDR, extra_entries=()):
         self.data = binary_data
+        self.extra_entries = set(extra_entries)
         self.entry_hints = set()
         self.base = base_addr
         self.size = len(binary_data)
@@ -77,64 +78,10 @@ class SH4Recompiler:
 
         self.call_targets = call_targets
 
-        # Forced entry points (code not detected by prologue/BSR analysis)
-        # These are reached via indirect jumps (JMP @Rn) or from BIOS dispatch
-        forced_entries = {
-            self.base + 0x100,    # 0x8C010100: relocated bootstrap entry point
-            0x8C148990,           # Main loop entry (BRA target from init)
-            0x8C14ACEE,           # Init function (JMP target from func_8C148988)
-            0x8C14AD46,           # Main game loop (JMP target from func_8C148990)
-            0x8C02A808,           # Indirect JSR target from game init
-            0x8C02A698,           # Game main() - dead code entry in func_8C02A680
-            0x8C02A6EC,           # Game main loop body (BRA target from func_8C02A760)
-            # Functions detected as unresolved indirect call targets at runtime:
-            0x8C080BA4,           # memcmp (CRT0 runtime)
-            0x8C07A870,           # Hardware init (writes constants)
-            0x8C07A570,           # Veneer (BRA to 0x8C07A4A0 with r4=0)
-            0x8C07A580,           # Setter (writes to TA FIFO base)
-            0x8C07A590,           # Setter (writes r5 to memory, returns 1)
-            0x8C073B10,           # Veneer (BRA to 0x8C073910 with r7=0)
-            0x8C073910,           # Target of 0x8C073B10 veneer
-            0x8C07A4A0,           # Target of 0x8C07A570 veneer
-            0x8C15ED94,           # SDK runtime function (called ~80x per frame)
-            0x8C15EA50,           # SDK runtime function
-            0x8C15EC28,           # SDK runtime function
-            0x8C14D214,           # Init function
-            0x8C15F258,           # SDK runtime function
-            0x8C15E56C,           # SDK runtime function
-            0x8C15EEDC,           # SDK runtime function
-            0x8C07A5A0,           # Setter function (near 0x8C07A590)
-            0x8C14D240,           # Cache flush continuation (P2 jump target from func_8C14D214)
-            # Session 3: unresolved targets discovered at runtime
-            0x8C087E9C,           # Init helper (called frequently from 0x8C0875F4)
-            0x8C1566A0,           # SDK/init function
-            0x8C15B282,           # SDK function (called via jsr @r3)
-            0x8C15B27C,           # SDK function (called via jsr @r3)
-            0x8C16C138,           # SDK runtime function
-            0x8C07A5F0,           # Setter function (near 0x8C07A5A0)
-            0x8C07A600,           # Setter function
-            0x8C07A610,           # Setter function (called ~9 times)
-            0x8C07A630,           # Setter function
-            0x8C1587BA,           # SDK function
-            0x8C15645C,           # SDK function
-            0x8C14B434,           # Init function
-            0x8C14BB4C,           # Init function
-            0x8C16C300,           # SDK runtime function
-            0x8C16F5FC,           # SDK runtime function
-            0x8C1564C6,           # PVR register write helper
-            # Session 3 round 2: more unresolved targets
-            0x8C153160,           # SDK function
-            0x8C156080,           # SDK function
-            0x8C15B368,           # SDK function
-            0x8C16DF10,           # SDK function
-            0x8C150246,           # Init function
-            0x8C080B2E,           # CRT function
-            0x8C073EB0,           # Game init function
-            0x8C074050,           # Game init function
-            0x8C075820,           # Game function
-            0x8C086BD8,           # Game function
-            0x8C156406,           # Rendering callback registration?
-        }
+        # Entry points no static pass can see: targets the game computes at
+        # runtime. They are per title, so they come from the game repo's
+        # --entries file, not from here (see docs/entries.md).
+        forced_entries = {self.base + 0x100} | self.extra_entries
 
         # Also scan for mov.l @(disp,PC) + JMP @Rn patterns to find indirect targets
         for i in range(0, len(self.data) - 4, 2):
@@ -1515,15 +1462,32 @@ class SH4Recompiler:
         return file_idx
 
 
+def load_entries(path):
+    """Read an --entries file: one address per line, '#' starts a comment.
+
+    Only the first token counts, so lines pasted from a run's
+    `[DISPATCH] unresolved call to 0x...` log work once trimmed to the address.
+    """
+    out = set()
+    with open(path) as f:
+        for line in f:
+            tok = line.split('#', 1)[0].split()
+            if tok:
+                out.add(int(tok[0], 0))
+    return out
+
+
 def main():
     # Parse arguments
     positional = []
     base_addr = LOAD_ADDR
-    for i, arg in enumerate(sys.argv[1:], 1):
-        if arg == '--base' and i + 1 <= len(sys.argv) - 1:
-            base_addr = int(sys.argv[i + 1], 0)
-        elif i > 1 and sys.argv[i - 1] == '--base':
-            continue  # skip value after --base
+    entries = set()
+    args = iter(sys.argv[1:])
+    for arg in args:
+        if arg == '--base':
+            base_addr = int(next(args), 0)
+        elif arg == '--entries':
+            entries |= load_entries(next(args))
         else:
             positional.append(arg)
 
@@ -1538,7 +1502,7 @@ def main():
     print(f"Binary: {len(data):,} bytes")
     print(f"Base address: 0x{base_addr:08X}")
 
-    recompiler = SH4Recompiler(data, base_addr)
+    recompiler = SH4Recompiler(data, base_addr, entries)
 
     print("Finding functions...")
     recompiler.find_functions()
@@ -1548,6 +1512,7 @@ def main():
     recompiler.generate_header(os.path.join(header_dir, "game_functions.h"))
 
     print("Generating dispatch table...")
+    os.makedirs(output_dir, exist_ok=True)
     recompiler.generate_dispatch_table(os.path.join(output_dir, "dispatch_table.c"))
 
     print("Recompiling functions to C...")

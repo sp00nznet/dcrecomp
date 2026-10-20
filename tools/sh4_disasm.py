@@ -9,6 +9,7 @@ The Dreamcast loads 1ST_READ.BIN at address 0x8C010000 in SH-4 memory space.
 import struct
 import sys
 import json
+import os
 from collections import defaultdict
 
 # Dreamcast 1ST_READ.BIN load address
@@ -747,69 +748,19 @@ def decode_sh4(opcode, pc):
     return f".word", f"0x{opcode:04X}", False, None
 
 
-def find_functions(binary_data, base_addr):
+def find_functions(binary_data, base_addr, extra_entries=()):
+    """The recompiler's own function discovery, so this map lists exactly what
+    static_recompile.py will compile: BSR targets, prologues, literal-pool
+    jsr/jmp targets, braf jump tables, code pointers in data, and --entries.
     """
-    Find function boundaries using heuristic analysis.
-    Functions typically start with sts.l pr, @-r15 and end with rts.
-    """
-    functions = {}
-    size = len(binary_data)
-
-    # First pass: find all BSR/JSR targets (these are function entry points)
-    call_targets = set()
-    branch_targets = set()
-
-    for offset in range(0, size - 1, 2):
-        opcode = struct.unpack_from('<H', binary_data, offset)[0]
-        pc = base_addr + offset
-
-        mnemonic, operands, is_branch, target = decode_sh4(opcode, pc)
-
-        if target and isinstance(target, int):
-            if mnemonic in ('bsr',):
-                call_targets.add(target)
-            elif mnemonic in ('bra', 'bt', 'bf', 'bt/s', 'bf/s'):
-                branch_targets.add(target)
-
-    # Second pass: find function prologues (sts.l pr, @-r15)
-    prologue_addrs = set()
-    for offset in range(0, size - 1, 2):
-        opcode = struct.unpack_from('<H', binary_data, offset)[0]
-        # sts.l pr, @-r15 = 0x4F22
-        if opcode == 0x4F22:
-            addr = base_addr + offset
-            prologue_addrs.add(addr)
-
-    # Combine: BSR targets are definitely functions
-    # Addresses with sts.l pr, @-r15 are likely functions
-    all_entry_points = sorted(call_targets | prologue_addrs)
-
-    # Also add the entry point
-    all_entry_points = sorted(set([base_addr]) | set(all_entry_points))
-
-    # Build function map
-    for i, entry in enumerate(all_entry_points):
-        if entry < base_addr or entry >= base_addr + size:
-            continue
-
-        # Determine function end (next function start or RTS)
-        if i + 1 < len(all_entry_points):
-            next_func = all_entry_points[i + 1]
-            func_size = next_func - entry
-        else:
-            func_size = (base_addr + size) - entry
-
-        functions[entry] = {
-            'addr': entry,
-            'size': func_size,
-            'has_prologue': entry in prologue_addrs,
-            'is_call_target': entry in call_targets,
-        }
-
-    return functions
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from static_recompile import SH4Recompiler
+    r = SH4Recompiler(binary_data, base_addr, extra_entries)
+    r.find_functions()
+    return r.functions
 
 
-def analyze_binary(filepath, base_addr=LOAD_ADDR):
+def analyze_binary(filepath, base_addr=LOAD_ADDR, extra_entries=()):
     """Full analysis of 1ST_READ.BIN."""
     with open(filepath, 'rb') as f:
         data = f.read()
@@ -857,7 +808,7 @@ def analyze_binary(filepath, base_addr=LOAD_ADDR):
 
     # Find functions
     print("\n=== Function Analysis ===")
-    functions = find_functions(data, base_addr)
+    functions = find_functions(data, base_addr, extra_entries)
     print(f"Functions found: {len(functions)}")
 
     # Function size distribution
@@ -908,9 +859,16 @@ def analyze_binary(filepath, base_addr=LOAD_ADDR):
 
 
 if __name__ == '__main__':
-    filepath = sys.argv[1] if len(sys.argv) > 1 else "disc_extract/1ST_READ.BIN"
-    base = LOAD_ADDR
-    for i, arg in enumerate(sys.argv):
-        if arg == '--base' and i + 1 < len(sys.argv):
-            base = int(sys.argv[i + 1], 0)
-    analyze_binary(filepath, base)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from static_recompile import load_entries
+    positional, base, entries = [], LOAD_ADDR, set()
+    args = iter(sys.argv[1:])
+    for arg in args:
+        if arg == '--base':
+            base = int(next(args), 0)
+        elif arg == '--entries':
+            entries |= load_entries(next(args))
+        else:
+            positional.append(arg)
+    filepath = positional[0] if positional else "disc_extract/1ST_READ.BIN"
+    analyze_binary(filepath, base, entries)

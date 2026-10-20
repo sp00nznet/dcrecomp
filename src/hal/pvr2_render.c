@@ -376,5 +376,6 @@ int pvr2_present_framebuffer(uint32_t a, uint32_t c, int w, int h) {
     (void)a; (void)c; (void)w; (void)h; return 0;
 }
 void pvr2_render_resize(int w, int h) { (void)w; (void)h; }
+int pvr2_screenshot(const char *path) { (void)path; return -1; } /* nothing drawn to read back */
 
 #endif /* HAS_OPENGL */

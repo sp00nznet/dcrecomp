@@ -17,6 +17,8 @@ versions: [SemVer](https://semver.org/). No release has been tagged yet.
 ### Fixed
 - `static_recompile.py` crashed writing `dispatch_table.c` to an output
   directory that did not exist yet (#2).
+- Builds without OpenGL/GLEW failed to link: `pvr2_screenshot` had no headless
+  stub (#4).
 
 ### Removed
 - `docs/flycast-extraction.md`: described a vendored `flycast/` tree that was

@@ -2,8 +2,7 @@
  * ARM7DI interpreter - the processor inside the AICA.
  *
  * ARMv3: ARM state only, no Thumb, no MMU, no long multiplies. Written from the
- * ARM Architecture Reference; deliberately not derived from any emulator, since
- * the obvious reference for this hardware is GPLv2 and this is MIT.
+ * ARM Architecture Reference, not from any emulator's source.
  *
  * Two things are easy to get wrong and worth stating up front.
  *

@@ -9,9 +9,7 @@
  * without ever entering its main loop.
  *
  * This is ARMv3: ARM state only, no Thumb, no MMU, no long multiplies. Written
- * from the ARM Architecture Reference. Deliberately not derived from any
- * emulator - Flycast is the obvious reference for how this hardware behaves,
- * and it is GPLv2, so nothing here is taken from it.
+ * from the ARM Architecture Reference, not from any emulator's source.
  *
  * The ARM sees sound RAM at 0x00000000 and the AICA's registers at 0x00800000.
  */

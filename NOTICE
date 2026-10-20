@@ -1,0 +1,14 @@
+dcrecomp
+Copyright (c) 2026 sp00nz
+Licensed under the GNU General Public License, version 2 (see LICENSE).
+
+Derived from Flycast (https://github.com/flyinghead/flycast), GPL-2.0,
+licence text in LICENSE:
+
+  src/hal/, include/hal/   PVR2, Holly and AICA register handling was written
+  (except arm7.*)          from reading Flycast's source. In src/hal/dc_hardware.c,
+                           dc_maple_dma follows Flycast's maple_DoDma.
+
+From 2026-03-25 to 2026-08-20 (commits 0d25775..cbe527d) the repository also
+vendored a copy of Flycast's hardware subsystems under flycast/. It was removed
+in cbe527d and remains in history under Flycast's GPL-2.0 licence.

@@ -1020,22 +1020,20 @@ void dc_maple_dma(DCHardware *hw, uint32_t mdstar) {
                 case 0x01: { /* MDC_DeviceRequest - get device info */
                     /* MDRS_DeviceStatus (0x05), 28 words of device info */
                     resp[0] = 0x05 | (src_addr << 8) | (dst_addr << 16) | (0x1C << 24);
-                    /* Function types: controller (bit 0) */
-                    resp[1] = 0x01000000; /* ft0 = Controller */
-                    resp[2] = 0x00000000; /* ft1 = none */
-                    resp[3] = 0x00000000; /* ft2 = none */
-                    /* Function definition block 0: controller capabilities
-                     * Bits[31:24] = 0xFF = all standard buttons
-                     * Bits[23:20] = 0x0  = R trigger present
-                     * Bits[19:16] = 0x6  = L trigger + analog axes */
-                    resp[4] = 0xFE060000;
-                    resp[5] = 0x00000000;
-                    resp[6] = 0x00000000;
-                    /* Product name (30 bytes) + license (60 bytes) + current */
-                    memset(&resp[7], 0x20, 84);
-                    memcpy(&resp[7], "Dreamcast Controller          ", 30);
-                    memcpy(&resp[15], "Produced By or Under License From SEGA ENTERPRISES,LTD.   ", 58);
-                    resp[29] = 0x01AE; /* standby 430mA / max 430mA */
+                    /* Device status payload: function, three definition words,
+                     * region/direction, 30-byte name, 60-byte license, currents.
+                     * Capabilities must immediately follow the function word. */
+                    memset(&resp[1],0,28*4);
+                    resp[1] = 0x01000000;
+                    resp[2] = 0xFE060F00; /* Buttons + R/L triggers + analog X/Y */
+                    uint8_t *info=(uint8_t *)&resp[1];
+                    info[16]=0xFF;info[17]=0;
+                    memset(info+18,' ',90);
+                    memcpy(info+18,"Dreamcast Controller",20);
+                    const char *license="Produced By or Under License From SEGA ENTERPRISES,LTD.";
+                    memcpy(info+48,license,strlen(license));
+                    info[108]=0xAE;info[109]=0x01; /* standby */
+                    info[110]=0xF4;info[111]=0x01; /* maximum */
                     break;
                 }
 

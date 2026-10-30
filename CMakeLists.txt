@@ -97,3 +97,7 @@ add_executable(arm7_selftest tests/arm7_selftest.c)
 target_include_directories(arm7_selftest PRIVATE include)
 enable_testing()
 add_test(NAME arm7 COMMAND arm7_selftest)
+
+add_executable(maple_controller_selftest tests/maple_controller_selftest.c)
+target_link_libraries(maple_controller_selftest PRIVATE dcrecomp_core)
+add_test(NAME maple_controller COMMAND maple_controller_selftest)

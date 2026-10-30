@@ -171,7 +171,7 @@ static uint64_t tmu_write_time_ms[3] = {0, 0, 0};
  */
 typedef struct {
     uint32_t r[16];
-    uint32_t pr, sr, gbr, mach, macl, fpul, fpscr;
+    uint32_t pc, pr, sr, gbr, mach, macl, fpul, fpscr;
     float fr[16], xf[16];
 } SH4IrqFrame;
 
@@ -384,7 +384,7 @@ void sh4_poll_irq(SH4CPU *cpu) {
 
     SH4IrqFrame f;
     memcpy(f.r, cpu->r, sizeof f.r);
-    f.pr = cpu->pr; f.sr = cpu->sr; f.gbr = cpu->gbr;
+    f.pc = cpu->pc; f.pr = cpu->pr; f.sr = cpu->sr; f.gbr = cpu->gbr;
     f.mach = cpu->mach; f.macl = cpu->macl;
     f.fpul = cpu->fpul; f.fpscr = cpu->fpscr;
     memcpy(f.fr, cpu->fr, sizeof f.fr);
@@ -404,7 +404,7 @@ void sh4_poll_irq(SH4CPU *cpu) {
     g_in_irq = false;
 
     memcpy(cpu->r, f.r, sizeof f.r);
-    cpu->pr = f.pr; cpu->sr = f.sr; cpu->gbr = f.gbr;
+    cpu->pc = f.pc; cpu->pr = f.pr; cpu->sr = f.sr; cpu->gbr = f.gbr;
     cpu->mach = f.mach; cpu->macl = f.macl;
     cpu->fpul = f.fpul; cpu->fpscr = f.fpscr;
     memcpy(cpu->fr, f.fr, sizeof f.fr);

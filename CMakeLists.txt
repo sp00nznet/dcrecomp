@@ -97,3 +97,7 @@ add_executable(arm7_selftest tests/arm7_selftest.c)
 target_include_directories(arm7_selftest PRIVATE include)
 enable_testing()
 add_test(NAME arm7 COMMAND arm7_selftest)
+
+add_executable(irq_dispatch_pc_selftest tests/irq_dispatch_pc_selftest.c)
+target_link_libraries(irq_dispatch_pc_selftest PRIVATE dcrecomp_core)
+add_test(NAME irq_dispatch_pc COMMAND irq_dispatch_pc_selftest)

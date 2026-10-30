@@ -97,3 +97,7 @@ add_executable(arm7_selftest tests/arm7_selftest.c)
 target_include_directories(arm7_selftest PRIVATE include)
 enable_testing()
 add_test(NAME arm7 COMMAND arm7_selftest)
+
+add_executable(holly_revision_selftest tests/holly_revision_selftest.c)
+target_link_libraries(holly_revision_selftest PRIVATE dcrecomp_core)
+add_test(NAME holly_revision COMMAND holly_revision_selftest)

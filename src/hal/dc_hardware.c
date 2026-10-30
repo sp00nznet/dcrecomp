@@ -130,6 +130,9 @@ uint32_t dc_hw_read32(DCHardware *hw, uint32_t addr) {
     dc_g2_retire_finished(hw);
 
     switch (phys) {
+    case 0x005F689C: /* SB_SBREV: read-only Holly system-bus revision. */
+        return 0x0000000B;
+
     case PVR_ID:
         return 0x17FD11DB;
 
